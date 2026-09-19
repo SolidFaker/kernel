@@ -5,14 +5,13 @@
 #include "task.h"
 #include "page.h"
 #include "syscall.h"
+#include "fs.h"
 #include "vfs.h"
 #include "fs/myfs.h"
 #include "drivers/display.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "drivers/tty.h"
-
-#include "test.h" // kernel test function
 
 static inline void init_stack();
 static void print_info();
@@ -51,18 +50,17 @@ void kernel_start(void)
 
     kthread_start(task_idle, &tty[0], 1, NULL);
     kthread_start(task_tty, &tty[0], 1, NULL);
-    kthread_start(test_a, &tty[1], 2, NULL);
-    kthread_start(test_b, &tty[2], 1, NULL);
-    kthread_start(test_c, &tty[2], 3, NULL);
-    kthread_start(test_d, &tty[3], 4, NULL);
-    kthread_start(test_e, &tty[1], 5, NULL);
+    kthread_start(task_init, &tty[1], 5, NULL);
+
+    // show the shell tty on boot
+    switch_tty(&tty[1]);
 
     // enable interrupt
     sti();
 
     printk("running ...\n");
     while(1) {
-        printk("%d\r", tick);
+        hlt();
     }
 
     hlt();

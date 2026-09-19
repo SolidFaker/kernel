@@ -64,8 +64,14 @@ user/hello.o: user/hello.c
 user/hello.elf: user/hello.o tools/user_link.ld
 	$(LD) -Ttools/user_link.ld -static -nostdlib --nmagic -melf_i386 user/hello.o -o user/hello.elf
 
-kernel.img: mkfs_kernel $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf user/hello.elf
-	./mkfs_kernel $(OUTDIR)/loader.bin loader.bin $(OUTDIR)/kernel.elf kernel.elf user/hello.elf hello.elf ./README.md README
+user/shell.o: user/shell.c
+	$(CC) $(UFLAGS) -c $< -o $@
+
+user/shell.elf: user/shell.o tools/user_link.ld
+	$(LD) -Ttools/user_link.ld -static -nostdlib --nmagic -melf_i386 user/shell.o -o user/shell.elf
+
+kernel.img: mkfs_kernel $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf user/hello.elf user/shell.elf
+	./mkfs_kernel $(OUTDIR)/loader.bin loader.bin $(OUTDIR)/kernel.elf kernel.elf user/hello.elf hello.elf user/shell.elf shell.elf ./README.md README
 
 # create the target disk on a fresh clone
 $(DISKIMG):

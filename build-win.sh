@@ -47,15 +47,17 @@ done
     boot/loaderasm.o boot/loadermain.o drivers/hd.o kernel/string.o kernel/elf.o \
     -o "$OUT/loader.bin"
 
-# ---- user program (loaded by exec) ----
+# ---- user programs (run by the shell via exec) ----
 UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall"
 "$CC" $UFLAGS user/hello.c -o user/hello.o
 "$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/hello.o -o user/hello.elf
+"$CC" $UFLAGS ${AUTO_DEMO:+-DAUTO_DEMO} user/shell.c -o user/shell.o
+"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/shell.o -o user/shell.elf
 
 # ---- host tool: filesystem image ----
 "$HOSTCC" -Os -I./include tools/mkfs.c -o mkfs_kernel.exe
 ./mkfs_kernel.exe "$OUT/loader.bin" loader.bin "$OUT/kernel.elf" kernel.elf \
-    user/hello.elf hello.elf ./README.md README
+    user/hello.elf hello.elf user/shell.elf shell.elf ./README.md README
 
 # ---- disk image ----
 [ -f 80m.img ] || dd if=/dev/zero of=80m.img bs=1M count=80
@@ -64,5 +66,5 @@ dd if="$OUT/loader.bin" of=80m.img obs=512 seek=1 conv=notrunc
 dd if=./kernel.img      of=80m.img obs=512 seek=10 conv=notrunc
 
 echo "---- build output ----"
-ls -l "$OUT/boot.bin" "$OUT/loader.bin" "$OUT/kernel.elf" user/hello.elf kernel.img 80m.img
+ls -l "$OUT/boot.bin" "$OUT/loader.bin" "$OUT/kernel.elf" user/hello.elf user/shell.elf kernel.img 80m.img
 echo "note: loader.bin must stay <= 4608 bytes (9 sectors read by boot.s)"

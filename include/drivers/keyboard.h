@@ -31,5 +31,6 @@ void init_keyboard();
 u8 is_controls_pressed(u8 controls_key);
 u8 pressed_key();
 u8 is_pressed(u8 keycode);
+int kbd_getchar(void);
 
 #endif

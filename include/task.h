@@ -62,5 +62,6 @@ void init_task();
 void schedule();
 void switch_to(struct task_struct *next);
 u32 task_idle(void *arg);
+u32 task_init(void *arg);
 
 #endif

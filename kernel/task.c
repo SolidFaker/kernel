@@ -4,6 +4,7 @@
 #include "string.h"
 #include "common.h"
 #include "debug.h"
+#include "syscall.h"
 
 extern void enter_user_mode();
 u32 pid_now = 0;
@@ -19,6 +20,21 @@ u32 task_idle(__UNUSED__ void *arg)
         hlt();
     }
     return 0;
+}
+
+// Boot-time launcher for the user world: drops to CPL3 on the per-task
+// user stack, then execs the shell. It runs only for a moment - the
+// exec replaces this task with shell.elf, and this code never runs again.
+u32 task_init(__UNUSED__ void *arg)
+{
+    asm volatile ("movl %0, %%ebp"::"r"((u32)current->user_stack));
+    asm volatile ("movl %0, %%esp"::"r"((u32)current->user_stack + USER_STACK_SIZE));
+
+    switch_to_user_mode();
+    exec("shell.elf");
+    print_str("shell exec failed\n");
+    exit();
+    return 0;  // not reached
 }
 
 void init_task()

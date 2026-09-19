@@ -132,8 +132,30 @@ static u8 ext_scan = 0; // set after a 0xE0 extended-key prefix
 struct keymap *default_layout = &us_keymap;
 u8 *scancodes;
 
-static inline void task_keyboard(){
-    display_putc(COLOR_BLACK, COLOR_GREEN, tty_cur, pressed_key());
+// character queue consumed by the read() syscall (the shell)
+#define KBD_BUF_SIZE 128
+static char kbd_buf[KBD_BUF_SIZE];
+static u32 kbd_head = 0;
+static u32 kbd_tail = 0;
+
+static void kbd_putc(char c)
+{
+    u32 next = (kbd_head + 1) % KBD_BUF_SIZE;
+    if (next == kbd_tail) {
+        return; // full: drop the key
+    }
+    kbd_buf[kbd_head] = c;
+    kbd_head = next;
+}
+
+int kbd_getchar(void)
+{
+    if (kbd_tail == kbd_head) {
+        return -1;
+    }
+    char c = kbd_buf[kbd_tail];
+    kbd_tail = (kbd_tail + 1) % KBD_BUF_SIZE;
+    return (u8)c;
 }
 
 static inline void switch_scancodes(){
@@ -197,19 +219,26 @@ void keyboard_callback()
     }
 
     scancodes = default_layout->scancodes;
-    // keyboard handler 
+    // keyboard handler
     // scancode & RELEASED_MASK means the key has been break
     if (scancode & RELEASED_MASK) {
-        // key pressed
+        // key released
         pressed = 0;
         reset_control_code();
-    } else {
-        pressed = 1;
-        set_control_code();
-        // capslock & shift mode
-        switch_scancodes();
-        // print task
-        task_keyboard();
+        return;
+    }
+    pressed = 1;
+    set_control_code();
+    // control combos (alt+digit tty switching etc.) are not console input
+    if (is_controls_pressed(CONTROL) || is_controls_pressed(ALT)) {
+        return;
+    }
+    // capslock & shift mode
+    switch_scancodes();
+    // queue the character for read(); echoing is done by the consumer
+    char c = (char)scancodes[scancode];
+    if (c) {
+        kbd_putc(c);
     }
 }
 

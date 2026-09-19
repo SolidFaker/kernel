@@ -1,6 +1,8 @@
 #include "syscall.h"
 #include "debug.h"
 #include "drivers/display.h"
+#include "drivers/keyboard.h"
+#include "drivers/tty.h"
 #include "elf.h"
 #include "fs.h"
 #include "mm.h"
@@ -29,6 +31,11 @@ int exec(const char *path)
     int a;
     asm volatile("int $0x80" : "=a" (a) : "0" (3), "b"(path));
     return a;
+}
+
+void exit()
+{
+    asm volatile("int $0x80" : : "a" (4));
 }
 
 int print_hex(u32 hex)
@@ -125,6 +132,8 @@ static int sys_exec(struct trap_frame *frame)
     }
 
     u32 entry = elf->entry;
+    // report while the old address space (holding `name`) is still alive
+    printk("exec %s: entry 0x%x\n", name, entry);
     kfree(eh);
 
     // commit: replace the old address space, then rewrite the trap
@@ -143,7 +152,6 @@ static int sys_exec(struct trap_frame *frame)
     frame->esp = stack_top;
     frame->useresp = stack_top;
 
-    printk("exec %s: entry 0x%x\n", name, entry);
     return 0;
 }
 
@@ -223,6 +231,148 @@ static int sys_print(struct trap_frame *frame)
     return 0;
 }
 
+// Terminate the calling task: free its address space, become a zombie
+// and switch away for good. Never returns.
+static int sys_exit(__UNUSED__ struct trap_frame *frame)
+{
+    switch_pdt(kernel_pdt_phys());
+    if (current->mm) {
+        mm_destroy(current->mm);
+        current->mm = NULL;
+    }
+    current->state = ZOMBIE;
+    // zero the slice so schedule() actually rotates away instead of
+    // just decrementing it and iretting back into the freed space
+    current->time_slice = 0;
+    schedule();  // zombies are never scheduled again
+
+    return 0;  // not reached
+}
+
+// Blocking single-character read from the keyboard queue. The task sleeps
+// (sti + hlt) until a key arrives; timer preemption during the wait is fine.
+static int sys_read(struct trap_frame *frame)
+{
+    char *ubuf = (char *)(frame->ebx);
+    if ((u32)ubuf < 0x1000) {
+        return -1;
+    }
+
+    int c = kbd_getchar();
+    if (c < 0) {
+        sti();
+        while ((c = kbd_getchar()) < 0) {
+            hlt();
+        }
+        cli();
+    }
+    ubuf[0] = (char)c;
+    return 1;
+}
+
+// Fill ubuf with the newline-separated names of the root directory.
+static int sys_ls(struct trap_frame *frame)
+{
+    char *ubuf = (char *)(frame->ebx);
+    u32 max = frame->ecx;
+    if ((u32)ubuf < 0x1000 || max == 0) {
+        return -1;
+    }
+
+    u32 pos = 0;
+    u32 i = 0;
+    struct dirent *de;
+    while ((de = readdir_fs(fs_root, i)) != 0) {
+        const char *n = de->name;
+        while (*n && pos + 1 < max) {
+            ubuf[pos++] = *n++;
+        }
+        if (pos + 1 < max) {
+            ubuf[pos++] = '\n';
+        }
+        i++;
+    }
+    ubuf[pos] = '\0';
+    return pos;
+}
+
+// Read a whole file by name straight into the caller's buffer.
+static int sys_cat(struct trap_frame *frame)
+{
+    const char *name = (const char *)(frame->ebx);
+    u8 *ubuf = (u8 *)(frame->ecx);
+    u32 size = frame->edx;
+    if ((u32)name < 0x1000 || (u32)ubuf < 0x1000 || size == 0) {
+        return -1;
+    }
+
+    struct fs_node *node = finddir_fs(fs_root, (char *)name);
+    if (node == 0 || (node->flags & 0x7) != FS_FILE) {
+        return -1;
+    }
+    return (int)read_fs(node, 0, size, ubuf);
+}
+
+// Move the calling task to tty n and show it.
+static int sys_chtty(struct trap_frame *frame)
+{
+    u32 n = frame->ebx;
+    if (n >= TTY_NUMBER) {
+        return -1;
+    }
+    current->tty = &tty[n];
+    tty_print = &tty[n];
+    switch_tty(&tty[n]);
+    return 0;
+}
+
+static u32 ps_utoa(char *dst, u32 max, u32 v)
+{
+    char tmp[10];
+    u32 i = 0, n = 0;
+    do {
+        tmp[i++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v != 0);
+    while (i > 0 && n < max) {
+        dst[n++] = tmp[--i];
+    }
+    return n;
+}
+
+// One line per task: "pid state tty prio\n". State letters match the
+// task_state enum order: Unused New Embryo Sleeping Runnable Zombie.
+static int sys_ps(struct trap_frame *frame)
+{
+    static const char state_char[] = "UNESRZ";
+    char *ubuf = (char *)(frame->ebx);
+    u32 max = frame->ecx;
+    if ((u32)ubuf < 0x1000 || max == 0) {
+        return -1;
+    }
+
+    u32 pos = 0;
+    struct task_list *node = running_task_head;
+    do {
+        struct task_struct *t = node->task;
+        if (pos + 16 >= max) {
+            break;
+        }
+        pos += ps_utoa(ubuf + pos, max - pos, t->pid);
+        ubuf[pos++] = ' ';
+        ubuf[pos++] = state_char[t->state > ZOMBIE ? 0 : t->state];
+        ubuf[pos++] = ' ';
+        pos += ps_utoa(ubuf + pos, max - pos, (u32)(t->tty - tty));
+        ubuf[pos++] = ' ';
+        pos += ps_utoa(ubuf + pos, max - pos, t->priority);
+        ubuf[pos++] = '\n';
+        node = node->next;
+    } while (node != running_task_head);
+
+    ubuf[pos] = '\0';
+    return pos;
+}
+
 int nosys(struct trap_frame *frame) {
     printk("SYSCALL NO.%d DOSE NOT EXIST.\n", frame->eax);
     return -1;
@@ -236,6 +386,12 @@ void init_syscall()
     syscalls[1] = &sys_fork;
     syscalls[2] = &sys_print_hex;
     syscalls[3] = &sys_exec;
+    syscalls[4] = &sys_exit;
+    syscalls[5] = &sys_read;
+    syscalls[6] = &sys_ls;
+    syscalls[7] = &sys_cat;
+    syscalls[8] = &sys_chtty;
+    syscalls[9] = &sys_ps;
 }
 
 void syscall_handler(struct trap_frame *frame)
