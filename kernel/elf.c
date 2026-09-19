@@ -13,7 +13,7 @@ disk_read_elf(struct elf_header *header, u32 header_offset)
         pa = (u8 *)ph->paddr;
         readseg(pa, ph->filesz,  header_offset + ph->off);
         if(ph->memsz > ph->filesz) {
-            stosb(pa + ph->filesz, 0, header_offset + (ph->memsz - ph->filesz));
+            stosb(pa + ph->filesz, 0, ph->memsz - ph->filesz);
         }
     }
     return (void *)(header->entry);

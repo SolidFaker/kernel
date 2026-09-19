@@ -5,9 +5,6 @@
 #include "drivers/tty.h"
 #include "page.h"
 
-#define PROC_SIZE 4096
-#define TASK_BLOCKED 0x1
-
 enum task_state { UNUSED, NEW, EMBRYO, SLEEPING, RUNNABLE, ZOMBIE };
 
 struct task_context {
@@ -48,13 +45,13 @@ struct task_list {
 
 // schedulable taskess list
 extern struct task_list *running_task_head;
-extern struct task_list *wait_task_head;
 // current taskess
 extern struct task_struct *current;
 // Global pid
 extern u32 pid_now;
 
-extern void switch_task(struct task_context *next, struct task_context *current);
+// saves the running state into prev's context and loads next's
+extern void switch_task(struct task_context *prev, struct task_context *next);
 
 void switch_to_user_mode();
 struct task_struct *alloc_task();

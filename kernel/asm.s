@@ -73,8 +73,6 @@ lidt (%eax)
     ret
 
 .macro IRQ num code
-    .short \code
-    .short \num
     .global irq\num
     irq\num:
         cli                          # Disable interrupts firstly.
@@ -87,7 +85,6 @@ lidt (%eax)
 # This macro creates a stub for an ISR which does NOT pass it's own
 # error code (adds a dummy errcode byte).
 .macro ISR_NOERRCODE code
-    .short \code
     .global isr\code
     isr\code:
         cli                         # Disable interrupts firstly.
@@ -99,7 +96,6 @@ lidt (%eax)
 # This macro creates a stub for an ISR which passes it's own
 # error code.
 .macro ISR_ERRCODE code
-    .short \code
     .global isr\code
     isr\code:
         cli                         # Disable interrupts.

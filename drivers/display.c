@@ -8,14 +8,14 @@ struct tty *tty_print;
 static void flush_cursor()
 {
     // for default vga support the screen width = 80
-    u16 cursor_location = 
+    u16 cursor_location =
         tty_cur->cursor_y * 80 + tty_cur->cursor_x + (tty_cur->offset>>1);
-    cli();
+    u32 flags = local_irq_save();
     outb(CRT_ADDR_REG, CURSOR_H); // set vga cursor high 8 bit
     outb(CRT_DATA_REG, cursor_location >> 8); // send cursor high 8 bit
     outb(CRT_ADDR_REG, CURSOR_L); // set vga cursor low 8 bit
     outb(CRT_DATA_REG, cursor_location); // send cursor low 8 bit
-    sti();
+    local_irq_restore(flags);
 }
 
 void flush_line(struct tty *_tty, u8 line)
@@ -35,7 +35,8 @@ void flush_screen(struct tty *_tty)
     u8 attribute_byte = (COLOR_BLACK << 4) | (COLOR_WHITE);
     u16 blank = 0x20 | (attribute_byte << 8);
     u16 i;
-    for (i = 1 * 80; i < 80 * 24; i++){
+    // clear every row below the title bar, including the last one
+    for (i = 1 * 80; i < 25 * 80; i++){
         _tty->buffer[i] = blank;
     }
     _tty->cursor_x = 0;
@@ -108,13 +109,10 @@ void display_print_color(u8 bg, u8 fg, const char *string)
 
 void display_print_hex(u32 num)
 {
-    char *pc = (char *)"0x00000000";
-    char *pc_t = pc;
-    pc += 10;
-    do{
-        *(--pc) = "0123456789abcdef"[num % 16];
-        num/=16;
-    }while(*(pc-1)!='x');
-    pc = pc_t;
-    display_print(pc);
+    char buf[11] = "0x00000000";
+    int i;
+    for (i = 0; i < 8; i++) {
+        buf[2 + i] = "0123456789abcdef"[(num >> ((7 - i) * 4)) & 0xf];
+    }
+    display_print(buf);
 }

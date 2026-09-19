@@ -40,9 +40,16 @@ static u32 read(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
     if (offset > 0){
         return 0;
     }
+    // only one sector is buffered; never copy more than the file holds
+    if (size > entry.data_size) {
+        size = entry.data_size;
+    }
+    if (size > SECTOR_SIZE) {
+        size = SECTOR_SIZE;
+    }
     readseg(sector_buffer, SECTOR_SIZE, entry.data_sector * SECTOR_SIZE);
     memcpy(buffer, sector_buffer, size);
-    return entry.data_size;
+    return size;
 }
 
 static struct dirent *readdir(struct fs_node *node, u32 index)

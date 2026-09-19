@@ -4,6 +4,7 @@
 #include "fs.h"
 #include "mm.h"
 #include "page.h"
+#include "string.h"
 #include "tools.h"
 #include "task.h"
 #include "init.h"
@@ -41,12 +42,16 @@ static int sys_exec(struct trap_frame *frame)
     int i = 0;
     struct fs_node *fs_root = (struct fs_node *)(frame->ecx);
     struct dirent *node = 0;
+    if (fs_root == 0) {
+        return -1;
+    }
     while ( (node = readdir_fs(fs_root, i)) != 0)
     {
         struct fs_node *fsnode = finddir_fs(fs_root, node->name);
-        if ((fsnode->flags & 0x7) == FS_FILE){
+        if (fsnode && (fsnode->flags & 0x7) == FS_FILE){
             char buf[256];
-            read_fs(fsnode, 0, 256, (u8 *)buf);
+            read_fs(fsnode, 0, sizeof(buf) - 1, (u8 *)buf);
+            buf[sizeof(buf) - 1] = '\0';
         }
         i++;
     }
@@ -55,12 +60,32 @@ static int sys_exec(struct trap_frame *frame)
 
 static int sys_fork(struct trap_frame *frame)
 {
+    if (current->user_stack == NULL) {
+        return -1;  // kernel threads have no user space to duplicate
+    }
+
     struct task_struct *new_task = alloc_task();
     new_task->context->esp -= FRAME_SIZE;
     new_task->frame = (struct trap_frame *)(new_task->context->esp);
     *new_task->frame = *frame;
     new_task->frame->eax = 0;
-    new_task->frame->esp = (u32)new_task->user_stack + USER_STACK_SIZE;
+
+    // The child gets a private copy of the parent's user stack and keeps
+    // running at the same stack offset, so locals and return addresses
+    // survive the fork.
+    memcpy(new_task->user_stack, current->user_stack, USER_STACK_SIZE);
+    u32 parent_top = (u32)current->user_stack + USER_STACK_SIZE;
+    if (frame->esp >= (u32)current->user_stack && frame->esp < parent_top) {
+        new_task->frame->esp =
+            (u32)new_task->user_stack + (frame->esp - (u32)current->user_stack);
+    } else {
+        new_task->frame->esp = (u32)new_task->user_stack + USER_STACK_SIZE;
+    }
+    if (frame->ebp >= (u32)current->user_stack && frame->ebp < parent_top) {
+        new_task->frame->ebp =
+            (u32)new_task->user_stack + (frame->ebp - (u32)current->user_stack);
+    }
+
     new_task->context->eip = (u32)int_ret_stub;
     new_task->state = RUNNABLE;
     return new_task->pid;
@@ -76,6 +101,12 @@ static int sys_print_hex(struct trap_frame *frame)
 static int sys_print(struct trap_frame *frame)
 {
     char *str = (char *)(frame->ebx);
+    // Reject null/near-null pointers. Full user/kernel validation needs real
+    // user space: user code currently lives in kernel .rodata, so its string
+    // literals legitimately sit above PAGE_OFFSET.
+    if ((u32)str < 0x1000) {
+        return -1;
+    }
     display_print(str);
     return 0;
 }
@@ -102,7 +133,7 @@ void syscall_handler(struct trap_frame *frame)
 
     // Check if the requested syscall number is valid.
     // The syscall number is found in EAX.
-    if (frame->eax > SYSCALL_NUM) {
+    if (frame->eax >= SYSCALL_NUM) {
         PANIC("bad syscall");
     }
     // Get the required syscall location.

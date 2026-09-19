@@ -9,7 +9,6 @@ extern void enter_user_mode();
 u32 pid_now = 0;
 
 struct task_list *running_task_head = NULL;
-struct task_list *wait_task_head = NULL;
 struct task_struct *current = NULL;
 
 // System idle task
@@ -32,8 +31,12 @@ void init_task()
     current->state = RUNNABLE;
     current->kernel_stack = &kernel_stack;
     current->time_slice = 50;
+    current->priority = 1;
     current->pid = pid_now++; // kernel pid is 0
     current->mm = NULL;       // do not need this for kernel
+    current->user_stack = NULL;
+    current->parent = NULL;
+    current->flags = 0;
     current->tty = tty_cur;
 
     running_task_head->task = current;
@@ -88,6 +91,8 @@ struct task_struct *alloc_task()
     u8 *kstack = (u8 *)kmalloc(KERNEL_STACK_SIZE);
     u8 *pstack = (u8 *)kmalloc(USER_STACK_SIZE);
     assert(kstack != NULL && pstack != NULL, "kern_thread: kmalloc error");
+    // the user stack is the only kernel heap memory CPL3 code must reach
+    kmem_mark_user(pstack, USER_STACK_SIZE);
 
     new_task->state = NEW;
     new_task->priority = current->priority;
@@ -143,10 +148,13 @@ u32 kthread_start(u32 (*fn)(void *), struct tty *tty, u8 priority, void *arg)
 void kthread_exit()
 {
     u32 val;
+    // grab the return value before printk clobbers %eax
     asm volatile ("movl %%eax, %0\n" :"=m"(val));
+    // never schedule this task again
+    current->state = ZOMBIE;
     printk("Thread exited with value 0x%x\n", val);
 
-    while(1);
+    while(1) hlt();
 }
 
 void switch_to_user_mode()

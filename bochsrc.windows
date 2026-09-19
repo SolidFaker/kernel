@@ -1,0 +1,21 @@
+# Bochs configuration for Windows
+# BIOS/vgabios images and bochs.exe live in I:/tools/bochs
+# Boot with:  I:/tools/bochs/bochs.exe -q -f bochsrc.windows
+
+megs: 64
+
+romimage: file="I:/tools/bochs/BIOS-bochs-latest"
+vgaromimage: file="I:/tools/bochs/VGABIOS-lgpl-latest.bin"
+
+ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
+ata0-master: type=disk, path="80m.img", mode=flat
+
+boot: disk
+
+log: log_bochsout
+
+# anything the kernel writes to port 0xE9 shows up in the log/console;
+# handy for headless validation (the kernel itself does not use it)
+port_e9_hack: enabled=1
+
+mouse: enabled=0

@@ -36,12 +36,10 @@ extern u8 kernel_stack[KERNEL_STACK_SIZE];
 extern u8 kernel_start_pos[];
 extern u8 kernel_end_pos[];
 
-// memoey page count
-extern u32 phy_page_count;
-
 void init_page_stack();
 void page_free(u32 p);
 u32  page_alloc();
+void kmem_mark_user(void *p, u32 len);
 
 void *kmalloc(u32 len);
 void kfree(void *p);

@@ -69,11 +69,17 @@ void kernel_start(void)
 
 static inline void init_stack()
 {
-    // use new stack space
-    asm volatile ("movw $0x10, %ax");
-    asm volatile ("movw %ax, %ss");
-    asm volatile ("movl %0, %%ebp"::"r"((u32)kernel_stack));
-    asm volatile ("movl %0, %%esp"::"r"((u32)kernel_stack + sizeof(kernel_stack)));
+    // use new stack space; one asm block so the input setup cannot be
+    // interleaved with the stack switch
+    asm volatile (
+        "movw $0x10, %%ax\n\t"
+        "movw %%ax, %%ss\n\t"
+        "movl %0, %%ebp\n\t"
+        "movl %1, %%esp\n\t"
+        :
+        : "r" ((u32)kernel_stack),
+          "r" ((u32)kernel_stack + sizeof(kernel_stack))
+        : "eax", "memory");
 }
 
 static void print_info()
@@ -88,9 +94,12 @@ static void print_info()
 
     printk("----------MEMORY MAP----------\n");
     for (i = 0; i < *count; i++){
-        printk("BASE: 0x%09X\tLENGTH: 0x%09X\tTYPE:0x%01X\n", 
-                ((map_entry+i)->base_low | (map_entry+i)->base_high<<8), 
-                ((map_entry+i)->length_low | (map_entry+i)->length_high<<8), 
+        // base/length are 64-bit values; print both halves
+        printk("BASE: 0x%08x%08x\tLENGTH: 0x%08x%08x\tTYPE:0x%01X\n",
+                (map_entry+i)->base_high,
+                (map_entry+i)->base_low,
+                (map_entry+i)->length_high,
+                (map_entry+i)->length_low,
                 (map_entry+i)->type);
     }
 }

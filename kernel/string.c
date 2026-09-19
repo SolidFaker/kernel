@@ -20,20 +20,23 @@ inline void bzero(u8 *dest, u32 len)
     memset(dest, 0, len);
 }
 
-// Compare two strings. Should return -1 if 
+// Compare two strings. Should return -1 if
 // str1 < str2, 0 if they are equal or 1 otherwise.
 inline int strcmp(const char *str1, const char *str2)
 {
-    while (*str1 && *str2 && (*str1++ == *str2++)){} 
-
-    if (*str1 == '\0' && *str2 == '\0') {
-        return 0;
+    while (*str1 && (*str1 == *str2)) {
+        str1++;
+        str2++;
     }
-    if (*str1 == '\0') {
+
+    if ((u8)*str1 < (u8)*str2) {
         return -1;
     }
+    if ((u8)*str1 > (u8)*str2) {
+        return 1;
+    }
 
-    return 1;
+    return 0;
 }
 
 // Copy the NULL-terminated string src into dest, and

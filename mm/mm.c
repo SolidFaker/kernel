@@ -18,28 +18,34 @@ static u32 heap_max = HEAP_START;
 static u32 page_stack[PAGE_STACK_SIZE];
 static u32 page_stack_top = 0;
 
-u32 memory_map_page[MEMORY_SIZE/(32*PAGE_SIZE)];
-
 void init_page_stack()
 {
     mmap_entry_t *map_entry = mmap;
 
     u8 i;
+    // entry 0 is the legacy low memory region, skipped on purpose:
+    // boot scratch areas (mmap/count/temp page tables) live below 0x5000.
+    // Regions above 4GB are unusable on 32-bit; base_high is ignored and
+    // anything past MEMORY_SIZE would overflow the page stack anyway.
     for (i = 1; i < *count; i++) {
-        // If this memory section are usable
-        if ((map_entry+i)->type == 0x1) {
-            // store these usable memory page to page mangement stack
-            u32 page_addr = (map_entry+i)->base_low;
-            u32 length = (map_entry+i)->base_low + (map_entry+i)-> length_low;
+        // If this memory section is usable
+        if ((map_entry+i)->type != 0x1) {
+            continue;
+        }
 
-            while (page_addr < length && page_addr <= MEMORY_SIZE) {
-                if (page_addr < (u32)kernel_start_pos || 
-                        page_addr > (u32)kernel_end_pos + 0x1000)
-                {
-                    page_free(page_addr);
-                }
-                page_addr += PAGE_SIZE;
+        u32 page_addr = (map_entry+i)->base_low;
+        u32 end = page_addr + (map_entry+i)->length_low;
+        if (end > MEMORY_SIZE) {
+            end = MEMORY_SIZE;
+        }
+
+        while (page_addr < end) {
+            if (page_addr < (u32)kernel_start_pos ||
+                    page_addr > (u32)kernel_end_pos + 0x1000)
+            {
+                page_free(page_addr);
             }
+            page_addr += PAGE_SIZE;
         }
     }
 }
@@ -53,7 +59,23 @@ u32 page_alloc()
 
 void page_free(u32 p)
 {
+    assert(page_stack_top < PAGE_STACK_SIZE - 1, "page stack overflow");
     page_stack[++page_stack_top] = p;
+}
+
+// Grant CPL3 access to the pages backing [p, p+len). Used for the per-task
+// user stack; the rest of the kernel heap stays supervisor-only.
+void kmem_mark_user(void *p, u32 len)
+{
+    u32 va = (u32)p & PAGE_MASK;
+    u32 end = ((u32)p + len + PAGE_SIZE - 1) & PAGE_MASK;
+
+    for (; va < end; va += PAGE_SIZE) {
+        u32 pa;
+        if (get_mapping(pdt_kernel, va, &pa)) {
+            map(pdt_kernel, va, pa, PG_PRESENT | PG_WRITE | PG_USER);
+        }
+    }
 }
 
 void *kmalloc(u32 len)

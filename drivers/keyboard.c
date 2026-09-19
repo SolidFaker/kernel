@@ -24,7 +24,7 @@ static struct keymap us_keymap = {
         0, // Num lock - 69
         0, // Scroll lock - 70
         0, // Home - 71
-        72, // Up arrow - 72
+        0, // Up arrow - 72 (extended key, arrives with 0xE0 prefix)
         0, // Page up - 73
         '-',
         0, // Left arrow - 75
@@ -32,7 +32,7 @@ static struct keymap us_keymap = {
         0, // Right arrow -77
         '+',
         0, // End - 79
-        80, // Dowm arrow - 80 
+        0, // Down arrow - 80 (extended key, arrives with 0xE0 prefix)
         0, // Page down - 81
         0, // Insert - 82
         0, // Delete - 83
@@ -128,6 +128,7 @@ static struct keymap us_keymap = {
 
 u8 scancode; // keyboard buffer
 u8 pressed = 0;
+static u8 ext_scan = 0; // set after a 0xE0 extended-key prefix
 struct keymap *default_layout = &us_keymap;
 u8 *scancodes;
 
@@ -181,6 +182,19 @@ static inline void reset_control_code(){
 void keyboard_callback()
 {
     scancode = inb(0x60);
+
+    // Extended keys (arrows, Home...) send a 0xE0 prefix byte first.
+    // They have no printable character, so swallow the two-byte sequence
+    // instead of indexing the keymap with the prefix byte.
+    if (ext_scan) {
+        ext_scan = 0;
+        pressed = 0;
+        return;
+    }
+    if (scancode == 0xE0) {
+        ext_scan = 1;
+        return;
+    }
 
     scancodes = default_layout->scancodes;
     // keyboard handler 

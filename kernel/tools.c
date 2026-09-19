@@ -9,13 +9,28 @@ void printk(const char *format, ...)
     va_list args;
     int i;
 
+    // the shared buffer must not be refilled from an interrupt handler
+    // while a task is printing from it
+    u32 flags = local_irq_save();
+
     va_start(args, format);
     i = vsprintf(buff, format, args);
     va_end(args);
 
     buff[i] = '\0';
 
+#ifdef DEBUG_E9
+    {   /* mirror output to the bochs debug port (see bochsrc port_e9_hack) */
+        const char *c;
+        for (c = buff; *c; c++) {
+            outb(0xE9, (u8)*c);
+        }
+    }
+#endif
+
     display_print(buff);
+
+    local_irq_restore(flags);
 }
 
 void printk_color(u8 fore, u8 back, const char *format, ...)
@@ -24,6 +39,8 @@ void printk_color(u8 fore, u8 back, const char *format, ...)
     va_list args;
     int i;
 
+    u32 flags = local_irq_save();
+
     va_start(args, format);
     i = vsprintf(buff, format, args);
     va_end(args);
@@ -31,6 +48,8 @@ void printk_color(u8 fore, u8 back, const char *format, ...)
     buff[i] = '\0';
 
     display_print_color(back, fore, buff);
+
+    local_irq_restore(flags);
 }
 
 static int skip_atoi(const char **s)

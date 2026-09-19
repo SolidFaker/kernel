@@ -105,7 +105,7 @@ static void init_8259A()
 static inline void write_tss(struct gdt_desc_struct *tss_entry, u32 ss0, u32 esp0)
 {
     u32 base = (u32)&(this_cpu.tss);
-    u32 limit = base + sizeof(this_cpu.tss);
+    u32 limit = sizeof(this_cpu.tss) - 1;
     tss_entry->limit0	= (u16) (limit);
     tss_entry->limit1	= ((limit) >> 16) & 0x0F;
     tss_entry->base0	= (u16) (base);
@@ -192,7 +192,8 @@ void irq_enable(u8 irq)
 void int_handler(struct trap_frame *frame)
 {
     interrupt_handler_t handler = interrupt_handlers[frame->int_no];
-    if (frame->int_no >= 32) {
+    // only remapped hardware IRQs live in 32..47; int 0x80 must not EOI
+    if (frame->int_no >= 32 && frame->int_no <= 47) {
         irq_eoi(frame->int_no);
     }
     if(handler){

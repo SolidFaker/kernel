@@ -22,13 +22,21 @@ GCFLAGS = -c -g -Os -m32 -ffreestanding -Wall -Werror -fno-pie
 GCFLAGS += $(INCLUDE) -fno-stack-protector
 ASFLAGS = --32
 MAPFLAGS = -Map kernel.map
-KNL_LDFLAGS = -static -nostdlib --nmagic -melf_i386 
-BTL_LDFLAGS = -static -nostdlib --nmagic --oformat=binary -melf_i386 
+KNL_LDFLAGS = -static -nostdlib --nmagic -melf_i386
+BTL_LDFLAGS = -static -nostdlib --nmagic --oformat=binary -melf_i386
 
-BTL_OBJ = ./boot/loaderasm.o ./boot/loadermain.o ./drivers/hd.o 
+BTL_OBJ = ./boot/loaderasm.o ./boot/loadermain.o ./drivers/hd.o
 BTL_OBJ += ./kernel/string.o ./kernel/elf.o
 
-all:clean $(OUTDIR)/boot.bin $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf dd test
+# `all` starts with `clean`, so never run make with -j here
+.PHONY: all clean mkfs floppy test-win
+.NOTPARALLEL:
+
+# Windows bochs (see bochsrc.windows); used by `make test-win`
+BOCHS_WIN ?= I:/tools/bochs/bochs.exe
+
+# build everything and write the disk image; boot it with `make test`
+all: clean $(OUTDIR)/boot.bin $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf dd
 
 clean:
 	rm -rf $(OUTDIR)/*
@@ -44,34 +52,28 @@ $(OUTDIR)/loader.bin: $(BTL_OBJ)
 $(OUTDIR)/boot.bin: ./boot/boot.o
 	$(LD) -Ttext 0x7c00 --oformat=binary ./boot/boot.o -o $(OUTDIR)/boot.bin
 
-mkfs:
+mkfs_kernel: tools/mkfs.c include/fs/myfs.h include/common.h
 	$(CC) $(INCLUDE) -m32 -Os tools/mkfs.c -o mkfs_kernel
 
-$(KNL_COBJ): %.o: %.c
-	$(CC) $(GCFLAGS) -c $< -o $@
+mkfs: mkfs_kernel
 
-$(KNL_SOBJ): %.o: %.s
-	$(AS) $(ASFLAGS) $< -o $@
+kernel.img: mkfs_kernel $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf
+	./mkfs_kernel $(OUTDIR)/loader.bin loader.bin $(OUTDIR)/kernel.elf kernel.elf ./README.md README
 
-./boot/loadermain.o: ./boot/loadermain.c
-	$(CC) $(GCFLAGS) -c $< -o $@
+# create the target disk on a fresh clone
+$(DISKIMG):
+	dd if=/dev/zero of=$(DISKIMG) bs=1M count=80
 
-./boot/boot.o: ./boot/boot.s
-	$(AS) $< -o $@
-
-./boot/loaderasm.sasm.o: ./boot/loaderasm.s
-	$(AS) $(ASFLAGS) $< -o $@
-
-dd:
-	./mkfs_kernel bin/loader.bin loader.bin bin/kernel.elf kernel.elf ./README.md README &\
+dd: $(OUTDIR)/boot.bin $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf kernel.img $(DISKIMG)
 	dd if=./$(OUTDIR)/boot.bin of=$(DISKIMG) obs=512 count=1 conv=notrunc
 	dd if=./$(OUTDIR)/loader.bin of=$(DISKIMG) obs=512 seek=1 conv=notrunc
 	dd if=./kernel.img of=$(DISKIMG) obs=512 seek=10 conv=notrunc
-#	dd if=./$(OUTDIR)/loader.bin of=$(DISKIMG) obs=512 seek=1 conv=notrunc
-#	dd if=./$(OUTDIR)/kernel.elf of=$(DISKIMG) obs=512 seek=3 conv=notrunc
 
 test:
 	bochs -f bochsrc
+
+test-win:
+	$(BOCHS_WIN) -q -f bochsrc.windows
 
 floppy:
 	dd if=/dev/zero of=./floppy.img bs=512 count=2880

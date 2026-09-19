@@ -20,7 +20,7 @@ void set_pixel(u16 x, u16 y, u8 color)
 void print_font8(u16 x, u16 y, u8 ch)
 {
     u16 i,j;
-    for(i=x; i<y+8; i++){
+    for(i=x; i<x+8; i++){
         for(j=y; j<y+8; j++){
             if(((font8[ch][j-y]>>(i-x))&0x1) == 1)
                 set_pixel(i,j,0xf);

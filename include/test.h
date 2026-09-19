@@ -10,7 +10,7 @@
 #include "tools.h"
 #include "vfs.h"
 
-u32 test_a(__UNUSED__ void *arg)
+static u32 test_a(__UNUSED__ void *arg)
 {
     // list the contents of /
     int i = 0;
@@ -25,7 +25,8 @@ u32 test_a(__UNUSED__ void *arg)
             display_print("\t(directory)\n");
         } else {
             char buf[256];
-            u32 sz = read_fs(fsnode, 0, 256, (u8 *)buf);
+            u32 sz = read_fs(fsnode, 0, sizeof(buf) - 1, (u8 *)buf);
+            buf[sz] = '\0';
             printk("\tlength:%u\n", sz);
             display_print("------------------------------\n");
             printk("%s\n", buf);
@@ -36,7 +37,7 @@ u32 test_a(__UNUSED__ void *arg)
     return 0;
 }
 
-u32 test_d(__UNUSED__ void *args)
+static u32 test_d(__UNUSED__ void *args)
 {
     // Switch kernel stack to user stack
     // this is only for test
@@ -57,19 +58,19 @@ u32 test_d(__UNUSED__ void *args)
     return 0;
 }
 
-u32 test_c(__UNUSED__ void *arg)
+static u32 test_c(__UNUSED__ void *arg)
 {
     u32 t = 0;
     while(1){
         t = tick + 10;
         display_print_color(COLOR_BLACK, COLOR_RED, "C");
-        while(tick < t){ 
+        while(tick < t){
         }
     }
     return 0;
 }
 
-u32 test_b(__UNUSED__ void *arg)
+static u32 test_b(__UNUSED__ void *arg)
 {
     u32 t = 0;
     while(1){

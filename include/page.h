@@ -39,7 +39,6 @@ typedef struct page_entry page_entry_t;
 extern page_entry_t pdt_kernel[1024];
 
 void switch_pdt(u32 pdt_addr);
-void enable_page();
 
 void map(page_entry_t *pdt_now, u32 va, u32 pa, u32 flags);
 void unmap(page_entry_t *pdt_now, u32 va);

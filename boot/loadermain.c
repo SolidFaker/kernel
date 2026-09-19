@@ -20,7 +20,7 @@ struct myfs_entry *find_file(const char *name)
             }
         }
     }
-    return &entries[0];
+    return NULL;
 }
 
 void init_myfs(u32 header_offset)
@@ -48,7 +48,13 @@ void loadermain(void)
 
     elf = (elf_header_t *)(0x10000); // scratch space
     init_myfs(0x20000);
+    if (entries == NULL) {
+        return; // no valid myfs on disk, let loaderasm.s handle error
+    }
     struct myfs_entry *tmp = find_file("kernel.elf");
+    if (tmp == NULL) {
+        return; // kernel.elf not found, let loaderasm.s handle error
+    }
 
     u32 elf_sector = tmp->data_sector;
 

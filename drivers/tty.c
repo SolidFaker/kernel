@@ -74,10 +74,10 @@ void switch_tty(struct tty *tty)
 
 static void set_video_start_addr(u32 addr)
 {
-    cli();
+    u32 flags = local_irq_save();
     outb(CRT_ADDR_REG, VBUFFER_START_H);
     outb(CRT_DATA_REG, (addr >> 8) & 0xFF);
     outb(CRT_ADDR_REG, VBUFFER_START_L);
     outb(CRT_DATA_REG, addr & 0xFF);
-    sti();
-};
+    local_irq_restore(flags);
+}

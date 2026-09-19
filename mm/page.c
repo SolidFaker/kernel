@@ -18,6 +18,9 @@ void init_page()
 {
     u32 i,j;
     u32 kpdt_start = PDT_INDEX(PAGE_OFFSET);
+    // FIXME: kernel mappings carry PG_USER because user mode currently runs
+    // kernel text at CPL3 (see switch_to_user_mode). Drop PG_USER here once
+    // real user programs are loaded below PAGE_OFFSET.
     for (i=kpdt_start, j=0; i < (kpdt_start + KPDT_COUNT); i++, j++) {
         pdt_kernel[i].base = ((u32)&pet_kernel[j] - PAGE_OFFSET) >> 12;
         pdt_kernel[i].flags = PG_WRITE | PG_PRESENT | PG_USER;
@@ -42,13 +45,6 @@ void switch_pdt(u32 pdt_addr)
     asm volatile ("movl %0, %%cr3" :: "r"(pdt_addr));   // put page table addr
 }
 
-void enable_page() {
-    u32 cr0;
-    asm volatile("movl %%cr0, %0": "=r"(cr0));
-    cr0 |= 0x80000000;                        // enable paging!
-    asm volatile("movl %0, %%cr0":: "r"(cr0));
-}
-
 // Mapping physical address to vritual address
 void map(page_entry_t *pdt_now, u32 va, u32 pa, u32 flags)
 {
@@ -70,7 +66,9 @@ void map(page_entry_t *pdt_now, u32 va, u32 pa, u32 flags)
         pet_now = (page_entry_t *)((u32)pet_now + PAGE_OFFSET);
     }
     pet_now[pet_index].base = (pa >> 12);
-    pet_now[pet_index].flags = flags | PG_USER;
+    // flags come from the caller: kernel memory stays supervisor-only,
+    // user pages pass PG_USER explicitly
+    pet_now[pet_index].flags = flags;
     // flush CPU page cache
     asm volatile ("invlpg (%0)" : : "a" (va));
 }

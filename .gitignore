@@ -2,9 +2,13 @@
 *.elf
 *.bin
 *.img
+*.img.lock
 *.out
 *.com
 *.map
 .vscode
 log_*
 freedos*
+mkfs_kernel
+mkfs_kernel.exe
+bin/

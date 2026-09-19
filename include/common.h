@@ -29,6 +29,20 @@ static inline void sti(void)
     asm volatile("sti");
 }
 
+// Save EFLAGS and disable interrupts; pair with local_irq_restore().
+// Unlike bare cli()/sti() this is safe inside interrupt handlers.
+static inline u32 local_irq_save(void)
+{
+    u32 flags;
+    asm volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+    return flags;
+}
+
+static inline void local_irq_restore(u32 flags)
+{
+    asm volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 static inline void stosb(void *addr, int data, int cnt)
 {
     asm volatile("cld; rep stosb" :
