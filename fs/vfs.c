@@ -37,18 +37,27 @@ static u8 sector_buffer[SECTOR_SIZE];
 static u32 read(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
 {
     struct myfs_entry entry = entries[node->inode];
-    if (offset > 0){
+
+    if (offset >= entry.data_size) {
         return 0;
     }
-    // only one sector is buffered; never copy more than the file holds
-    if (size > entry.data_size) {
-        size = entry.data_size;
+    if (size > entry.data_size - offset) {
+        size = entry.data_size - offset;
     }
-    if (size > SECTOR_SIZE) {
-        size = SECTOR_SIZE;
+
+    // files span whole sectors; copy the requested range chunk by chunk
+    u32 done = 0;
+    while (done < size) {
+        u32 sec = entry.data_sector + (offset + done) / SECTOR_SIZE;
+        u32 in_off = (offset + done) % SECTOR_SIZE;
+        u32 chunk = SECTOR_SIZE - in_off;
+        if (chunk > size - done) {
+            chunk = size - done;
+        }
+        readseg(sector_buffer, SECTOR_SIZE, sec * SECTOR_SIZE);
+        memcpy(buffer + done, sector_buffer + in_off, chunk);
+        done += chunk;
     }
-    readseg(sector_buffer, SECTOR_SIZE, entry.data_sector * SECTOR_SIZE);
-    memcpy(buffer, sector_buffer, size);
     return size;
 }
 

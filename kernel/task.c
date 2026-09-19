@@ -58,7 +58,7 @@ void schedule()
             if (running_task_head->task->state == RUNNABLE) {
                 // Switch to next
                 switch_to(running_task_head->task);
-            } 
+            }
             // Return if no more task
             if (running_task_head->task == current) {
                 return;
@@ -77,6 +77,12 @@ void switch_to(struct task_struct *next)
         tty_print = next->tty;
         // Change our kernel stack over.
         set_kernel_stack((u32)next->kernel_stack+KERNEL_STACK_SIZE);
+        // switch address space if the tasks do not share one
+        u32 next_pdt = next->mm ? next->mm->pdt_phys : kernel_pdt_phys();
+        u32 prev_pdt = prev->mm ? prev->mm->pdt_phys : kernel_pdt_phys();
+        if (next_pdt != prev_pdt) {
+            switch_pdt(next_pdt);
+        }
         switch_task(prev->context, current->context);
     }
 }

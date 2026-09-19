@@ -2,7 +2,9 @@
 #include "mm.h"
 #include "page.h"
 #include "init.h"
+#include "string.h"
 #include "tools.h"
+#include "task.h"
 
 u8 kernel_stack[KERNEL_STACK_SIZE];
 mmap_entry_t *mmap = (mmap_entry_t *)(0x1000 + PAGE_OFFSET);
@@ -76,6 +78,91 @@ void kmem_mark_user(void *p, u32 len)
             map(pdt_kernel, va, pa, PG_PRESENT | PG_WRITE | PG_USER);
         }
     }
+}
+
+u32 kernel_pdt_phys(void)
+{
+    return (u32)pdt_kernel - PAGE_OFFSET;
+}
+
+// Build an empty user address space. The kernel half of the directory
+// (entries 768..1023) is shared with pdt_kernel by referencing the very
+// same page tables, so kernel text/data/heap stay mapped (and stay in
+// sync for map()s inside existing tables) in every task. Only a page
+// table that appears AFTER this point (kernel heap growing past its
+// current 4MB region) would be missed - not a case this kernel hits.
+struct mm_struct *mm_create(void)
+{
+    struct mm_struct *mm =
+        (struct mm_struct *)kmalloc(sizeof(struct mm_struct));
+    u32 pdt_pa = page_alloc();
+
+    mm->pdt = (page_entry_t *)(pdt_pa + PAGE_OFFSET);
+    mm->pdt_phys = pdt_pa;
+    bzero((u8 *)mm->pdt, PAGE_SIZE);
+
+    u32 i;
+    for (i = PDT_INDEX(PAGE_OFFSET); i < PAGE_TABLE_SIZE; i++) {
+        mm->pdt[i] = pdt_kernel[i];
+    }
+    return mm;
+}
+
+// Duplicate an address space: every user page is copied (no COW), so
+// fork() children get private memory immediately.
+struct mm_struct *mm_copy(struct mm_struct *src)
+{
+    struct mm_struct *mm = mm_create();
+    u32 i, j;
+
+    for (i = 0; i < PDT_INDEX(PAGE_OFFSET); i++) {
+        if (!(src->pdt[i].flags & PG_PRESENT)) {
+            continue;
+        }
+        page_entry_t *spet =
+            (page_entry_t *)((u32)(src->pdt[i].base << 12) + PAGE_OFFSET);
+        u32 dpet_pa = page_alloc();
+        page_entry_t *dpet = (page_entry_t *)(dpet_pa + PAGE_OFFSET);
+        bzero((u8 *)dpet, PAGE_SIZE);
+
+        mm->pdt[i] = src->pdt[i];
+        mm->pdt[i].base = dpet_pa >> 12;
+
+        for (j = 0; j < PAGE_TABLE_SIZE; j++) {
+            if (!(spet[j].flags & PG_PRESENT)) {
+                continue;
+            }
+            u32 pa = page_alloc();
+            memcpy((u8 *)(pa + PAGE_OFFSET),
+                   (u8 *)((u32)(spet[j].base << 12) + PAGE_OFFSET),
+                   PAGE_SIZE);
+            dpet[j].base = pa >> 12;
+            dpet[j].flags = spet[j].flags;
+        }
+    }
+    return mm;
+}
+
+// Must not run while CR3 still points at mm->pdt_phys.
+void mm_destroy(struct mm_struct *mm)
+{
+    u32 i, j;
+
+    for (i = 0; i < PDT_INDEX(PAGE_OFFSET); i++) {
+        if (!(mm->pdt[i].flags & PG_PRESENT)) {
+            continue;
+        }
+        page_entry_t *pet =
+            (page_entry_t *)((u32)(mm->pdt[i].base << 12) + PAGE_OFFSET);
+        for (j = 0; j < PAGE_TABLE_SIZE; j++) {
+            if (pet[j].flags & PG_PRESENT) {
+                page_free(pet[j].base << 12);
+            }
+        }
+        page_free(mm->pdt[i].base << 12);
+    }
+    page_free(mm->pdt_phys);
+    kfree(mm);
 }
 
 void *kmalloc(u32 len)
@@ -161,13 +248,19 @@ void free_chunk(memory_header_t *chunk)
 void split_chunk(memory_header_t *chunk, u32 len)
 {
     // 切分内存块之前得保证之后的剩余内存至少容纳一个内存管理块的大小
+    // the remainder starts right after the kept part; the old code placed
+    // the header at the chunk END, overwriting the next chunk's header
+    // (and leaving its ->next pointing at itself, hanging later walks)
     if (chunk->length - len > sizeof (memory_header_t)) {
-        memory_header_t *newchunk = (memory_header_t *)((u32)chunk + chunk->length);
+        memory_header_t *newchunk = (memory_header_t *)((u32)chunk + len);
         newchunk->prev = chunk;
         newchunk->next = chunk->next;
         newchunk->allocated = 0;
         newchunk->length = chunk->length - len;
 
+        if (newchunk->next) {
+            newchunk->next->prev = newchunk;
+        }
         chunk->next = newchunk;
         chunk->length = len;
     }

@@ -20,7 +20,8 @@ struct task_context {
 }__attribute__((packed));
 
 struct mm_struct {
-    page_entry_t *pdt_task; // taskess's pdt
+    page_entry_t *pdt;     // kernel-space alias of the page directory
+    u32 pdt_phys;          // physical address, for loading into CR3
 };
 
 struct task_struct {

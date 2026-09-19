@@ -58,6 +58,21 @@ static u32 test_d(__UNUSED__ void *args)
     return 0;
 }
 
+// drop to CPL3 like test_d, then replace this task with the ELF program
+// "hello.elf" loaded from the disk filesystem
+static u32 test_e(__UNUSED__ void *args)
+{
+    asm volatile ("movl %0, %%ebp"::"r"((u32)current->user_stack));
+    asm volatile ("movl %0, %%esp"::"r"((u32)current->user_stack + USER_STACK_SIZE));
+
+    switch_to_user_mode();
+    int ret = exec("hello.elf");
+    print_str("exec failed\n");
+    while(1);
+
+    return ret;
+}
+
 static u32 test_c(__UNUSED__ void *arg)
 {
     u32 t = 0;

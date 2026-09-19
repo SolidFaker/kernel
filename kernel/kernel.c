@@ -55,6 +55,7 @@ void kernel_start(void)
     kthread_start(test_b, &tty[2], 1, NULL);
     kthread_start(test_c, &tty[2], 3, NULL);
     kthread_start(test_d, &tty[3], 4, NULL);
+    kthread_start(test_e, &tty[1], 5, NULL);
 
     // enable interrupt
     sti();

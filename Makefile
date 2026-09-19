@@ -7,7 +7,7 @@ INCLUDE = -I./include
 DISKIMG = ./80m.img
 OUTDIR = bin
 
-EXCLUDE = -not -path "./boot/*" -not -path "./tools/*"
+EXCLUDE = -not -path "./boot/*" -not -path "./tools/*" -not -path "./user/*"
 KNL_CSRC = $(shell find . -name "*.c" $(EXCLUDE))
 KNL_SSRC = $(shell find . -name "*.s" $(EXCLUDE))
 
@@ -20,6 +20,7 @@ BTL_LD = tools/loader_link.ld
 
 GCFLAGS = -c -g -Os -m32 -ffreestanding -Wall -Werror -fno-pie
 GCFLAGS += $(INCLUDE) -fno-stack-protector
+UFLAGS  = -c -Os -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall
 ASFLAGS = --32
 MAPFLAGS = -Map kernel.map
 KNL_LDFLAGS = -static -nostdlib --nmagic -melf_i386
@@ -57,8 +58,14 @@ mkfs_kernel: tools/mkfs.c include/fs/myfs.h include/common.h
 
 mkfs: mkfs_kernel
 
-kernel.img: mkfs_kernel $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf
-	./mkfs_kernel $(OUTDIR)/loader.bin loader.bin $(OUTDIR)/kernel.elf kernel.elf ./README.md README
+user/hello.o: user/hello.c
+	$(CC) $(UFLAGS) -c $< -o $@
+
+user/hello.elf: user/hello.o tools/user_link.ld
+	$(LD) -Ttools/user_link.ld -static -nostdlib --nmagic -melf_i386 user/hello.o -o user/hello.elf
+
+kernel.img: mkfs_kernel $(OUTDIR)/loader.bin $(OUTDIR)/kernel.elf user/hello.elf
+	./mkfs_kernel $(OUTDIR)/loader.bin loader.bin $(OUTDIR)/kernel.elf kernel.elf user/hello.elf hello.elf ./README.md README
 
 # create the target disk on a fresh clone
 $(DISKIMG):
