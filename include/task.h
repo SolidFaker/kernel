@@ -30,7 +30,9 @@ struct task_struct {
     u32 time_slice;
     u32 flags;
     u8 priority;
+    char name[16];               // task name: kthread label / program name
     u32 exit_code;               // set by exit(), read by waitpid()
+    u32 brk;                     // user heap break (mm tasks only)
     void *kernel_stack;
     void *user_stack;
     enum task_state state;
@@ -59,7 +61,8 @@ extern void switch_task(struct task_context *prev, struct task_context *next);
 
 void switch_to_user_mode();
 struct task_struct *alloc_task();
-u32  kthread_start(u32 (*fn)(void *), struct tty *tty, u8 priority, void *arg);
+u32  kthread_start(const char *name, u32 (*fn)(void *),
+                   struct tty *tty, u8 priority, void *arg);
 void kthread_exit();
 void init_task();
 void schedule();

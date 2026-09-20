@@ -4,6 +4,7 @@
 #include "string.h"
 #include "common.h"
 #include "debug.h"
+#include "drivers/timer.h"
 #include "syscall.h"
 
 extern void enter_user_mode();
@@ -59,6 +60,7 @@ void init_task()
     current->kernel_stack = &kernel_stack;
     current->time_slice = 50;
     current->priority = 1;
+    strcpy(current->name, "main");
     current->pid = pid_now++; // kernel pid is 0
     current->mm = NULL;       // do not need this for kernel
     current->user_stack = NULL;
@@ -78,6 +80,15 @@ void init_task()
 void schedule()
 {
     // Current task run out time slice
+    //
+    // NOTE: a task must never become non-RUNNABLE from inside code reached
+    // through schedule() (i.e. between two switches). Every switch happens
+    // with interrupts off inside some unfinished timer IRQ; if the task set
+    // stops making progress the whole chain of suspended rotations can
+    // livelock and the timer never completes (tick freezes). Blocking
+    // syscalls (read/waitpid/nanosleep) therefore keep the task RUNNABLE
+    // and wait with sti+hlt instead; only exit() leaves the rotation, and
+    // it never comes back.
     if (current->time_slice == 0) {
         current->time_slice = current->priority * 50;
         // Find next RUNNABLE
@@ -133,6 +144,15 @@ struct task_struct *alloc_task()
     new_task->priority = current->priority;
     new_task->time_slice = current->priority * 50;
     new_task->exit_code = 0;
+    new_task->brk = 0;
+    // the child keeps the parent's name until it execs something else
+    {
+        u32 k;
+        for (k = 0; k < sizeof(new_task->name) - 1 && current->name[k]; k++) {
+            new_task->name[k] = current->name[k];
+        }
+        new_task->name[k] = '\0';
+    }
     new_task->kernel_stack = kstack;
     new_task->user_stack = pstack;
     new_task->parent = current;
@@ -162,10 +182,18 @@ struct task_struct *alloc_task()
 }
 
 // Create kernel taskess
-u32 kthread_start(u32 (*fn)(void *), struct tty *tty, u8 priority, void *arg)
+u32 kthread_start(const char *name, u32 (*fn)(void *), struct tty *tty,
+                  u8 priority, void *arg)
 {
     struct task_struct *new_task = alloc_task();
 
+    {
+        u32 k;
+        for (k = 0; k < sizeof(new_task->name) - 1 && name[k]; k++) {
+            new_task->name[k] = name[k];
+        }
+        new_task->name[k] = '\0';
+    }
     new_task->priority = priority;
     new_task->time_slice = priority * 50;
     new_task->mm = NULL;
@@ -189,7 +217,7 @@ void kthread_exit(){
     asm volatile ("movl %%eax, %0\n" :"=m"(val));
     // never schedule this task again
     current->state = ZOMBIE;
-    printk("Thread exited with value 0x%x\n", val);
+    printk("%s exited with value 0x%x\n", current->name, val);
 
     while(1) hlt();
 }

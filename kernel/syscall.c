@@ -2,6 +2,7 @@
 #include "debug.h"
 #include "drivers/display.h"
 #include "drivers/keyboard.h"
+#include "drivers/timer.h"
 #include "drivers/tty.h"
 #include "elf.h"
 #include "fs.h"
@@ -135,8 +136,9 @@ static int sys_exec(struct trap_frame *frame)
 
     struct mm_struct *mm = mm_create();
 
-    // map + fill every PT_LOAD segment
+    // map + fill every PT_LOAD segment; track the heap start
     u32 i;
+    u32 brk_max = 0;
     elf_section_header_t *ph = (elf_section_header_t *)(eh + elf->phoff);
     for (i = 0; i < elf->phnum; i++, ph++) {
         if (ph->type != ELF_PROG_LOAD) {
@@ -144,6 +146,9 @@ static int sys_exec(struct trap_frame *frame)
         }
         u32 seg_start = ph->vaddr & PAGE_MASK;
         u32 seg_end = ph->vaddr + ph->memsz;
+        if (seg_end > brk_max) {
+            brk_max = seg_end;
+        }
         u32 va;
 
         // freshly allocated pages hold garbage: zero them via the
@@ -199,8 +204,16 @@ static int sys_exec(struct trap_frame *frame)
     copy_to_userva(mm, sp, (const u8 *)words, 4 * (argc + 3));
 
     u32 entry = elf->entry;
-    // report while the old address space (holding `name`) is still alive
+    // report while the old address space (holding `name`) is still alive,
+    // and adopt the program name as the task name
     printk("exec %s: entry 0x%x (argc %d)\n", name, entry, argc);
+    {
+        u32 k;
+        for (k = 0; k < sizeof(current->name) - 1 && name[k]; k++) {
+            current->name[k] = name[k];
+        }
+        current->name[k] = '\0';
+    }
     kfree(eh);
 
     // commit: replace the old address space, then rewrite the trap
@@ -210,6 +223,8 @@ static int sys_exec(struct trap_frame *frame)
         mm_destroy(current->mm);
     }
     current->mm = mm;
+    // the user heap starts right after the last segment
+    current->brk = (brk_max + PAGE_SIZE - 1) & PAGE_MASK;
 
     frame->gs = frame->fs = frame->es = frame->ds = __USER_DS;
     frame->ss = __USER_DS;
@@ -371,6 +386,79 @@ static int sys_waitpid(struct trap_frame *frame)
     kfree(node);
     kfree(z);
     return (int)reaped;
+}
+
+// Grow/shrink the calling task's user heap (brk(0) queries the break).
+// Only newly mapped pages are zeroed; already-mapped pages keep their
+// contents across partial grows.
+static int sys_brk(struct trap_frame *frame)
+{
+    u32 addr = frame->ebx;
+    if (current->mm == 0) {
+        return -1;  // kernel threads have no user heap
+    }
+    u32 old = current->brk;
+    if (addr == 0 || addr == old) {
+        return (int)old;
+    }
+    // keep the heap clear of the user stack
+    u32 heap_limit = USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE;
+    if (addr > heap_limit) {
+        return -1;
+    }
+
+    if (addr > old) {
+        u32 va;
+        for (va = old & PAGE_MASK; va < addr; va += PAGE_SIZE) {
+            u32 pa;
+            if (!get_mapping(current->mm->pdt, va, &pa)) {
+                pa = page_alloc();
+                map(current->mm->pdt, va, pa,
+                    PG_PRESENT | PG_WRITE | PG_USER);
+                bzero((u8 *)(pa + PAGE_OFFSET), PAGE_SIZE);
+            }
+        }
+    } else {
+        u32 va;
+        for (va = (addr + PAGE_SIZE - 1) & PAGE_MASK; va < old;
+                va += PAGE_SIZE) {
+            u32 pa;
+            if (get_mapping(current->mm->pdt, va, &pa)) {
+                unmap(current->mm->pdt, va);
+                page_free(pa);
+            }
+        }
+    }
+    current->brk = addr;
+    return (int)addr;
+}
+
+// Sleep for {tv_sec, tv_nsec}. The task stays RUNNABLE and idles with
+// sti+hlt until the deadline: going SLEEPING here would remove the only
+// task that can complete the pending timer interrupt and freeze tick
+// (see the NOTE in schedule()).
+static int sys_nanosleep(struct trap_frame *frame)
+{
+    u32 *req = (u32 *)(frame->ebx);
+    if ((u32)req < 0x1000) {
+        return -1;
+    }
+    u32 ms = req[0] * 1000 + req[1] / 1000000;
+    if (ms == 0) {
+        return 0;
+    }
+    u32 deadline = tick + ms * TIMER_HZ / 1000;
+    sti();
+    while (tick < deadline) {
+        hlt();
+    }
+    cli();
+    return 0;
+}
+
+static int sys_time(__UNUSED__ struct trap_frame *frame)
+{
+    return (int)(tick / TIMER_HZ);
 }
 
 // Blocking read on the standard input: sleep (sti + hlt) until at least
@@ -607,7 +695,7 @@ static int sys_ps(struct trap_frame *frame)
     struct task_list *node = running_task_head;
     do {
         struct task_struct *t = node->task;
-        if (pos + 16 >= max) {
+        if (pos + 32 >= max) {
             break;
         }
         pos += ps_utoa(ubuf + pos, max - pos, t->pid);
@@ -617,6 +705,13 @@ static int sys_ps(struct trap_frame *frame)
         pos += ps_utoa(ubuf + pos, max - pos, (u32)(t->tty - tty));
         ubuf[pos++] = ' ';
         pos += ps_utoa(ubuf + pos, max - pos, t->priority);
+        ubuf[pos++] = ' ';
+        {
+            const char *n = t->name;
+            while (*n && pos + 1 < max) {
+                ubuf[pos++] = *n++;
+            }
+        }
         ubuf[pos++] = '\n';
         node = node->next;
     } while (node != running_task_head);
@@ -649,6 +744,9 @@ void init_syscall()
     syscalls[NR_getpid] = &sys_getpid;
     syscalls[NR_getdents] = &sys_getdents;
     syscalls[NR_waitpid] = &sys_waitpid;
+    syscalls[NR_brk] = &sys_brk;
+    syscalls[NR_nanosleep] = &sys_nanosleep;
+    syscalls[NR_time] = &sys_time;
 }
 
 void syscall_handler(struct trap_frame *frame)

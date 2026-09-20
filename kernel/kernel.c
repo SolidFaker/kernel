@@ -41,16 +41,16 @@ void kernel_start(void)
 
     // interrupt handler registed
     init_keyboard();
-    init_timer(2000);     // schedule() here
+    init_timer(TIMER_HZ);     // schedule() here
 
     flush_screen(tty_cur);
 
     // print system info
     print_info();
 
-    kthread_start(task_idle, &tty[0], 1, NULL);
-    kthread_start(task_tty, &tty[0], 1, NULL);
-    kthread_start(task_init, &tty[1], 5, NULL);
+    kthread_start("idle", task_idle, &tty[0], 1, NULL);
+    kthread_start("ttyd", task_tty, &tty[0], 1, NULL);
+    kthread_start("init", task_init, &tty[1], 5, NULL);
 
     // show the shell tty on boot
     switch_tty(&tty[1]);

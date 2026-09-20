@@ -23,6 +23,9 @@
 #define NR_getpid      15
 #define NR_getdents    16  /* getdents(fd, buf, max) */
 #define NR_waitpid     17  /* waitpid(pid, &status, 0); pid==-1 = any child */
+#define NR_brk         18  /* brk(addr); addr==0 returns the current break */
+#define NR_nanosleep   19  /* nanosleep({sec,nsec}, NULL) */
+#define NR_time        20  /* time(NULL): uptime in seconds */
 
 /* open() flags (only the access mode is honoured; the filesystem is
    read-only) */

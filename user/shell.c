@@ -190,7 +190,7 @@ static void run_cmd(const char *cmd, const char *arg)
         return;
     }
     if (streq(cmd, "ps")) {
-        print("pid state tty prio\n");
+        print("pid state tty prio name\n");
         int n = ps(iobuf, sizeof(iobuf) - 1);
         if (n < 0) {
             print("ps failed\n");
