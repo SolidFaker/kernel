@@ -20,7 +20,7 @@ BTL_LD = tools/loader_link.ld
 
 GCFLAGS = -c -g -Os -m32 -ffreestanding -Wall -Werror -fno-pie
 GCFLAGS += $(INCLUDE) -fno-stack-protector
-UFLAGS  = -c -Os -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall
+UFLAGS  = -c -Os -m32 -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall $(INCLUDE)
 ASFLAGS = --32
 MAPFLAGS = -Map kernel.map
 KNL_LDFLAGS = -static -nostdlib --nmagic -melf_i386

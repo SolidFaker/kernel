@@ -2,6 +2,7 @@
 #define TASK_H
 
 #include "common.h"
+#include "fs.h"
 #include "drivers/tty.h"
 #include "page.h"
 
@@ -34,6 +35,7 @@ struct task_struct {
     enum task_state state;
     struct mm_struct *mm;         // task memory space
     struct tty *tty;
+    struct file fds[FD_MAX];      // open files; 0/1/2 = std streams
     struct task_context *context;      // switch() here to run taskess
     struct trap_frame *frame;
     struct task_struct *parent;
@@ -63,5 +65,6 @@ void schedule();
 void switch_to(struct task_struct *next);
 u32 task_idle(void *arg);
 u32 task_init(void *arg);
+void fds_init_std(struct task_struct *task);
 
 #endif

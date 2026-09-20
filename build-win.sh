@@ -48,7 +48,7 @@ done
     -o "$OUT/loader.bin"
 
 # ---- user programs (run by the shell via exec) ----
-UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall"
+UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall -I./include"
 "$CC" $UFLAGS user/hello.c -o user/hello.o
 "$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/hello.o -o user/hello.elf
 "$CC" $UFLAGS ${AUTO_DEMO:+-DAUTO_DEMO} user/shell.c -o user/shell.o

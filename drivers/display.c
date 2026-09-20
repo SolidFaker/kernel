@@ -100,6 +100,15 @@ void display_print(const char *string)
     }
 }
 
+// Bounded write used by the write() syscall: len bytes, no NUL needed.
+void display_write(struct tty *_tty, const char *string, u32 len)
+{
+    u32 i;
+    for (i = 0; i < len; i++) {
+        display_putc(COLOR_BLACK, COLOR_WHITE, _tty, string[i]);
+    }
+}
+
 void display_print_color(u8 bg, u8 fg, const char *string)
 {
     while (*string) {

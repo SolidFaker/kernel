@@ -11,6 +11,7 @@
 #include "tools.h"
 #include "task.h"
 #include "init.h"
+#include "unistd.h"
 #include "vfs.h"
 
 typedef int (*sysc_func) (struct trap_frame *r);
@@ -36,13 +37,6 @@ int exec(const char *path)
 void exit()
 {
     asm volatile("int $0x80" : : "a" (4));
-}
-
-int print_hex(u32 hex)
-{
-    int a;
-    asm volatile("int $0x80" : "=a" (a) : "0" (2), "b"(hex));
-    return a;
 }
 
 int print_str(const char *str)
@@ -203,13 +197,6 @@ static int sys_fork(struct trap_frame *frame)
     return new_task->pid;
 }
 
-static int sys_print_hex(struct trap_frame *frame)
-{
-    u32 hex = (u32)(frame->ebx);
-    display_print_hex(hex);
-    return 0;
-}
-
 static int sys_print(struct trap_frame *frame)
 {
     char *str = (char *)(frame->ebx);
@@ -249,40 +236,183 @@ static int sys_exit(__UNUSED__ struct trap_frame *frame)
     return 0;  // not reached
 }
 
-// Blocking single-character read from the keyboard queue. The task sleeps
-// (sti + hlt) until a key arrives; timer preemption during the wait is fine.
+// Blocking read on the standard input: sleep (sti + hlt) until at least
+// one key is available, then drain up to `count`. Timer preemption during
+// the wait is fine. Regular files read through the VFS at f->offset.
 static int sys_read(struct trap_frame *frame)
 {
-    char *ubuf = (char *)(frame->ebx);
-    if ((u32)ubuf < 0x1000) {
+    int fd = (int)frame->ebx;
+    u8 *ubuf = (u8 *)(frame->ecx);
+    u32 count = frame->edx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
+            (u32)ubuf < 0x1000 || count == 0) {
         return -1;
     }
 
-    int c = kbd_getchar();
-    if (c < 0) {
-        sti();
-        while ((c = kbd_getchar()) < 0) {
-            hlt();
+    struct file *f = &current->fds[fd];
+    if (f->kind == FD_TTY_IN) {
+        int c = kbd_getchar();
+        if (c < 0) {
+            sti();
+            while ((c = kbd_getchar()) < 0) {
+                hlt();
+            }
+            cli();
         }
-        cli();
+        u32 n = 0;
+        ubuf[n++] = (u8)c;
+        while (n < count && (c = kbd_getchar()) >= 0) {
+            ubuf[n++] = (u8)c;
+        }
+        return (int)n;
     }
-    ubuf[0] = (char)c;
-    return 1;
+    if (f->kind == FD_FILE) {
+        u32 n = read_fs(f->node, f->offset, count, ubuf);
+        f->offset += n;
+        return (int)n;
+    }
+    return -1;  // directories do not read
 }
 
-// Fill ubuf with the newline-separated names of the root directory.
-static int sys_ls(struct trap_frame *frame)
+// Write to the standard output/error; the filesystem is read-only.
+static int sys_write(struct trap_frame *frame)
 {
-    char *ubuf = (char *)(frame->ebx);
-    u32 max = frame->ecx;
-    if ((u32)ubuf < 0x1000 || max == 0) {
+    int fd = (int)frame->ebx;
+    const char *ubuf = (const char *)(frame->ecx);
+    u32 count = frame->edx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
+            (u32)ubuf < 0x1000) {
         return -1;
     }
 
+    struct file *f = &current->fds[fd];
+    if (f->kind == FD_TTY_OUT) {
+#ifdef DEBUG_E9
+        {   /* mirror output to the bochs debug port for headless runs */
+            const char *c;
+            for (c = ubuf; c < ubuf + count; c++) {
+                outb(0xE9, (u8)*c);
+            }
+        }
+#endif
+        display_write(current->tty, ubuf, count);
+        return (int)count;
+    }
+    return -1;
+}
+
+static int sys_open(struct trap_frame *frame)
+{
+    const char *name = (const char *)(frame->ebx);
+    u32 flags = frame->ecx;
+    if ((u32)name < 0x1000) {
+        return -1;
+    }
+
+    struct fs_node *node;
+    if ((name[0] == '.' && name[1] == 0) ||
+            (name[0] == '/' && name[1] == 0)) {
+        node = fs_root;
+    } else {
+        node = finddir_fs(fs_root, (char *)name);
+    }
+    if (node == 0) {
+        return -1;
+    }
+    if ((flags & O_RDWR) != 0 && (node->flags & 0x7) == FS_FILE) {
+        return -1;  // read-only filesystem
+    }
+
+    int fd;
+    for (fd = 0; fd < FD_MAX; fd++) {
+        if (!current->fds[fd].used) {
+            break;
+        }
+    }
+    if (fd == FD_MAX) {
+        return -1;
+    }
+
+    current->fds[fd].used = 1;
+    current->fds[fd].kind =
+        ((node->flags & 0x7) == FS_DIRECTORY) ? FD_DIR : FD_FILE;
+    current->fds[fd].node = node;
+    current->fds[fd].offset = 0;
+    return fd;
+}
+
+static int sys_close(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) {
+        return -1;
+    }
+    memset((u8 *)&current->fds[fd], 0, sizeof(current->fds[fd]));
+    return 0;
+}
+
+static int sys_lseek(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    int offset = (int)frame->ecx;
+    u32 whence = frame->edx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
+            current->fds[fd].kind != FD_FILE) {
+        return -1;
+    }
+
+    struct file *f = &current->fds[fd];
+    u32 base;
+    switch (whence) {
+        case SEEK_SET: base = 0; break;
+        case SEEK_CUR: base = f->offset; break;
+        case SEEK_END: base = f->node->length; break;
+        default: return -1;
+    }
+    if (offset < 0 && (u32)(-offset) > base) {
+        return -1;
+    }
+    f->offset = base + offset;
+    return (int)f->offset;
+}
+
+static int sys_fstat(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    struct stat *ust = (struct stat *)(frame->ecx);
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
+            (u32)ust < 0x1000) {
+        return -1;
+    }
+
+    struct fs_node *node = current->fds[fd].node;
+    ust->st_mode =
+        ((node->flags & 0x7) == FS_DIRECTORY) ? S_IFDIR : S_IFREG;
+    ust->st_size = node->length;
+    return 0;
+}
+
+static int sys_getpid(__UNUSED__ struct trap_frame *frame)
+{
+    return (int)current->pid;
+}
+
+// Read directory entries behind a directory fd: fills ubuf with the
+// newline-separated names, starting at the fd's iteration index.
+static int sys_getdents(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    char *ubuf = (char *)(frame->ecx);
+    u32 max = frame->edx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
+            current->fds[fd].kind != FD_DIR || (u32)ubuf < 0x1000 || max == 0) {
+        return -1;
+    }
+
+    struct file *f = &current->fds[fd];
     u32 pos = 0;
-    u32 i = 0;
     struct dirent *de;
-    while ((de = readdir_fs(fs_root, i)) != 0) {
+    while ((de = readdir_fs(f->node, f->offset)) != 0) {
         const char *n = de->name;
         while (*n && pos + 1 < max) {
             ubuf[pos++] = *n++;
@@ -290,27 +420,12 @@ static int sys_ls(struct trap_frame *frame)
         if (pos + 1 < max) {
             ubuf[pos++] = '\n';
         }
-        i++;
+        f->offset++;
     }
-    ubuf[pos] = '\0';
+    if (pos < max) {
+        ubuf[pos] = '\0';
+    }
     return pos;
-}
-
-// Read a whole file by name straight into the caller's buffer.
-static int sys_cat(struct trap_frame *frame)
-{
-    const char *name = (const char *)(frame->ebx);
-    u8 *ubuf = (u8 *)(frame->ecx);
-    u32 size = frame->edx;
-    if ((u32)name < 0x1000 || (u32)ubuf < 0x1000 || size == 0) {
-        return -1;
-    }
-
-    struct fs_node *node = finddir_fs(fs_root, (char *)name);
-    if (node == 0 || (node->flags & 0x7) != FS_FILE) {
-        return -1;
-    }
-    return (int)read_fs(node, 0, size, ubuf);
 }
 
 // Move the calling task to tty n and show it.
@@ -382,16 +497,20 @@ void init_syscall()
 {
     // Register our syscall handler.
     register_interrupt_handler (0x80, &syscall_handler);
-    syscalls[0] = &sys_print;
-    syscalls[1] = &sys_fork;
-    syscalls[2] = &sys_print_hex;
-    syscalls[3] = &sys_exec;
-    syscalls[4] = &sys_exit;
-    syscalls[5] = &sys_read;
-    syscalls[6] = &sys_ls;
-    syscalls[7] = &sys_cat;
-    syscalls[8] = &sys_chtty;
-    syscalls[9] = &sys_ps;
+    syscalls[NR_print]  = &sys_print;   /* legacy, used by task_init */
+    syscalls[NR_fork]   = &sys_fork;
+    syscalls[NR_exec]   = &sys_exec;
+    syscalls[NR_exit]   = &sys_exit;
+    syscalls[NR_read]   = &sys_read;
+    syscalls[NR_chtty]  = &sys_chtty;
+    syscalls[NR_ps]     = &sys_ps;
+    syscalls[NR_open]   = &sys_open;
+    syscalls[NR_close]  = &sys_close;
+    syscalls[NR_write]  = &sys_write;
+    syscalls[NR_lseek]  = &sys_lseek;
+    syscalls[NR_fstat]  = &sys_fstat;
+    syscalls[NR_getpid] = &sys_getpid;
+    syscalls[NR_getdents] = &sys_getdents;
 }
 
 void syscall_handler(struct trap_frame *frame)

@@ -11,6 +11,31 @@
 #define FS_SYMLINK     0x06
 #define FS_MOUNTPOINT  0x08 // Is the file an active mountpoint?
 
+// Per-task file descriptors (see struct task_struct)
+#define FD_MAX 16
+
+#define FD_FREE    0
+#define FD_TTY_IN  1   // fd 0: the keyboard
+#define FD_TTY_OUT 2   // fd 1/2: the task's tty
+#define FD_FILE    3   // a regular file on the (read-only) filesystem
+#define FD_DIR     4   // a directory, iterable with getdents()
+
+struct file {
+    u8 used;
+    u8 kind;
+    struct fs_node *node;
+    u32 offset;    // file position / getdents index
+};
+
+// Minimal POSIX-style stat (see fstat)
+#define S_IFREG 0x8000
+#define S_IFDIR 0x4000
+
+struct stat {
+    u32 st_mode;
+    u32 st_size;
+};
+
 struct fs_node;
 
 typedef              u32 (*fn_read_fs)    (struct fs_node*,u32,u32,u8*);

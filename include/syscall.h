@@ -9,7 +9,6 @@
 void init_syscall();
 
 int print_str(const char *str);
-int print_hex(u32 hex);
 int fork();
 int exec(const char *path);
 void exit();

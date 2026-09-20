@@ -12,6 +12,17 @@ u32 pid_now = 0;
 struct task_list *running_task_head = NULL;
 struct task_struct *current = NULL;
 
+// Install fd 0/1/2 on the keyboard and the task's tty.
+void fds_init_std(struct task_struct *task)
+{
+    task->fds[0].used = 1;
+    task->fds[0].kind = FD_TTY_IN;
+    task->fds[1].used = 1;
+    task->fds[1].kind = FD_TTY_OUT;
+    task->fds[2].used = 1;
+    task->fds[2].kind = FD_TTY_OUT;
+}
+
 // System idle task
 // save power
 u32 task_idle(__UNUSED__ void *arg)
@@ -54,6 +65,8 @@ void init_task()
     current->parent = NULL;
     current->flags = 0;
     current->tty = tty_cur;
+    memset((u8 *)current->fds, 0, sizeof(current->fds));
+    fds_init_std(current);
 
     running_task_head->task = current;
     running_task_head->next = running_task_head;
@@ -125,6 +138,8 @@ struct task_struct *alloc_task()
     new_task->pid = pid_now++;
     new_task->mm = NULL;
     new_task->tty = current->tty;
+    // POSIX-style: the child inherits the parent's open descriptors
+    memcpy((u8 *)new_task->fds, (u8 *)current->fds, sizeof(new_task->fds));
 
     new_task->context->esp = (u32)((u32)kstack + KERNEL_STACK_SIZE);
     new_task->context->ebp = (u32)kstack;
@@ -167,8 +182,7 @@ u32 kthread_start(u32 (*fn)(void *), struct tty *tty, u8 priority, void *arg)
     return new_task->pid;
 }
 
-void kthread_exit()
-{
+void kthread_exit(){
     u32 val;
     // grab the return value before printk clobbers %eax
     asm volatile ("movl %%eax, %0\n" :"=m"(val));
