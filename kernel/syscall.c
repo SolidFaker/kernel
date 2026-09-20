@@ -27,16 +27,18 @@ int fork()
     return a;
 }
 
-int exec(const char *path)
+int execve(const char *path, char *const argv[], char *const envp[])
 {
     int a;
-    asm volatile("int $0x80" : "=a" (a) : "0" (3), "b"(path));
+    asm volatile("int $0x80" : "=a" (a)
+                 : "0" (NR_exec), "b" (path), "c" (argv), "d" (envp)
+                 : "memory");
     return a;
 }
 
-void exit()
+void exit(int status)
 {
-    asm volatile("int $0x80" : : "a" (4));
+    asm volatile("int $0x80" : : "a" (NR_exit), "b" (status) : "memory");
 }
 
 int print_str(const char *str)
@@ -46,14 +48,69 @@ int print_str(const char *str)
     return a;
 }
 
+// Write len bytes to a user virtual address of an mm being built (not
+// yet loaded into CR3), through the physical memory alias.
+static void copy_to_userva(struct mm_struct *mm, u32 va, const u8 *src, u32 len)
+{
+    u32 done = 0;
+    while (done < len) {
+        u32 pa;
+        get_mapping(mm->pdt, va + done, &pa);
+        u8 *dst = (u8 *)(pa + PAGE_OFFSET + ((va + done) & ~PAGE_MASK));
+        u32 chunk = PAGE_SIZE - ((va + done) & ~PAGE_MASK);
+        if (chunk > len - done) {
+            chunk = len - done;
+        }
+        memcpy(dst, src + done, chunk);
+        done += chunk;
+    }
+}
+
 // Load the ELF program stored in `name` into a fresh address space and
 // turn the current task into it. Never returns on success: the syscall
 // return path irets straight into the program's entry point.
+// execve semantics: argv==0 falls back to { path }; envp is ignored
+// (the environment is always empty for now).
 static int sys_exec(struct trap_frame *frame)
 {
     const char *name = (const char *)frame->ebx;
+    char **argv_user = (char **)(frame->ecx);
     if ((u32)name < 0x1000) {
         return -1;
+    }
+
+    // gather the argv strings while the old address space is still alive
+    char argv_buf[256];
+    u32 argv_off[8];
+    u32 argc = 0;
+    u32 str_bytes = 0;
+    if ((u32)argv_user >= 0x1000) {
+        u32 i;
+        for (i = 0; i < 8 && argv_user[i] != 0; i++) {
+            const char *s = argv_user[i];
+            if ((u32)s < 0x1000) {
+                continue;
+            }
+            u32 len = (u32)strlen(s);
+            if (str_bytes + len + 1 > sizeof(argv_buf)) {
+                break;
+            }
+            memcpy((u8 *)(argv_buf + str_bytes), (const u8 *)s, len + 1);
+            argv_off[argc] = str_bytes;
+            str_bytes += len + 1;
+            argc++;
+        }
+    }
+    if (argc == 0) {
+        u32 len = (u32)strlen(name);
+        if (len > sizeof(argv_buf) - 1) {
+            len = sizeof(argv_buf) - 1;
+        }
+        memcpy((u8 *)argv_buf, (const u8 *)name, len);
+        argv_buf[len] = '\0';
+        argv_off[0] = 0;
+        str_bytes = len + 1;
+        argc = 1;
     }
 
     struct fs_node *node = finddir_fs(fs_root, (char *)name);
@@ -125,9 +182,25 @@ static int sys_exec(struct trap_frame *frame)
         bzero((u8 *)(pa + PAGE_OFFSET), PAGE_SIZE);
     }
 
+    // build the initial stack words: [argc][argv...][NULL][envp NULL]
+    // with the strings just below the stack top (x86 process start)
+    u32 sp = stack_top - str_bytes;
+    copy_to_userva(mm, sp, (const u8 *)argv_buf, str_bytes);
+    u32 str_base = sp;
+    sp &= ~3u;
+    sp -= 4 * (argc + 3);
+    u32 words[8 + 3];
+    words[0] = argc;
+    for (i = 0; i < argc; i++) {
+        words[1 + i] = str_base + argv_off[i];
+    }
+    words[1 + argc] = 0;  // argv terminator
+    words[2 + argc] = 0;  // envp terminator
+    copy_to_userva(mm, sp, (const u8 *)words, 4 * (argc + 3));
+
     u32 entry = elf->entry;
     // report while the old address space (holding `name`) is still alive
-    printk("exec %s: entry 0x%x\n", name, entry);
+    printk("exec %s: entry 0x%x (argc %d)\n", name, entry, argc);
     kfree(eh);
 
     // commit: replace the old address space, then rewrite the trap
@@ -143,8 +216,8 @@ static int sys_exec(struct trap_frame *frame)
     frame->cs = __USER_CS;
     frame->eflags = 0x202;          // IF set, bit 1 always one
     frame->eip = entry;
-    frame->esp = stack_top;
-    frame->useresp = stack_top;
+    frame->esp = sp;
+    frame->useresp = sp;
 
     return 0;
 }
@@ -218,10 +291,12 @@ static int sys_print(struct trap_frame *frame)
     return 0;
 }
 
-// Terminate the calling task: free its address space, become a zombie
-// and switch away for good. Never returns.
-static int sys_exit(__UNUSED__ struct trap_frame *frame)
+// Terminate the calling task: record the exit status, free its address
+// space, become a zombie and switch away for good. Never returns; the
+// task memory is reclaimed by the parent's waitpid().
+static int sys_exit(struct trap_frame *frame)
 {
+    current->exit_code = frame->ebx;
     switch_pdt(kernel_pdt_phys());
     if (current->mm) {
         mm_destroy(current->mm);
@@ -234,6 +309,68 @@ static int sys_exit(__UNUSED__ struct trap_frame *frame)
     schedule();  // zombies are never scheduled again
 
     return 0;  // not reached
+}
+
+static struct task_struct *task_find_child(struct task_struct *parent,
+                                           int pid, int zombie_only)
+{
+    struct task_list *node = running_task_head;
+    do {
+        struct task_struct *t = node->task;
+        if (t->parent == parent &&
+                (!zombie_only || t->state == ZOMBIE) &&
+                (pid == -1 || (int)t->pid == pid)) {
+            return t;
+        }
+        node = node->next;
+    } while (node != running_task_head);
+    return 0;
+}
+
+// Wait for a child to exit and reap it: pid > 0 selects one child,
+// -1 any child. Blocks (sti + hlt) until a matching zombie exists,
+// then unlinks it from the schedule ring and frees its memory.
+static int sys_waitpid(struct trap_frame *frame)
+{
+    int pid = (int)frame->ebx;
+    u32 *ustatus = (u32 *)(frame->ecx);
+    if (pid == 0 || pid < -1) {
+        return -1;  // process groups are not supported
+    }
+
+    struct task_struct *z;
+    for (;;) {
+        z = task_find_child(current, pid, 1);
+        if (z != 0) {
+            break;
+        }
+        if (task_find_child(current, pid, 0) == 0) {
+            return -1;  // no such child
+        }
+        // no zombie yet: idle until the child runs and exits
+        sti();
+        hlt();
+        cli();
+    }
+
+    if (ustatus != 0 && (u32)ustatus >= 0x1000) {
+        *ustatus = z->exit_code;
+    }
+
+    // unlink the zombie's node from the ring and free the task
+    struct task_list *prev = running_task_head;
+    while (prev->next->task != z) {
+        prev = prev->next;
+    }
+    struct task_list *node = prev->next;
+    prev->next = node->next;
+    u32 reaped = z->pid;
+    kfree(z->context);
+    kfree(z->kernel_stack);
+    kfree(z->user_stack);
+    kfree(node);
+    kfree(z);
+    return (int)reaped;
 }
 
 // Blocking read on the standard input: sleep (sti + hlt) until at least
@@ -511,6 +648,7 @@ void init_syscall()
     syscalls[NR_fstat]  = &sys_fstat;
     syscalls[NR_getpid] = &sys_getpid;
     syscalls[NR_getdents] = &sys_getdents;
+    syscalls[NR_waitpid] = &sys_waitpid;
 }
 
 void syscall_handler(struct trap_frame *frame)

@@ -42,9 +42,9 @@ u32 task_init(__UNUSED__ void *arg)
     asm volatile ("movl %0, %%esp"::"r"((u32)current->user_stack + USER_STACK_SIZE));
 
     switch_to_user_mode();
-    exec("shell.elf");
+    execve("shell.elf", 0, 0);
     print_str("shell exec failed\n");
-    exit();
+    exit(1);
     return 0;  // not reached
 }
 
@@ -132,6 +132,7 @@ struct task_struct *alloc_task()
     new_task->state = NEW;
     new_task->priority = current->priority;
     new_task->time_slice = current->priority * 50;
+    new_task->exit_code = 0;
     new_task->kernel_stack = kstack;
     new_task->user_stack = pstack;
     new_task->parent = current;

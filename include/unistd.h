@@ -8,8 +8,8 @@
 #define NR_print       0   /* legacy: write a string to the tty */
 #define NR_fork        1
 #define NR_print_hex   2   /* retired */
-#define NR_exec        3   /* exec(path); argv/envp not supported yet */
-#define NR_exit        4   /* exit(); no status propagation yet */
+#define NR_exec        3   /* execve(path, argv, envp); argv==0 -> {path}; envp ignored */
+#define NR_exit        4   /* exit(status) */
 #define NR_read        5   /* read(fd, buf, count) */
 #define NR_ls          6   /* retired: open(".") + getdents */
 #define NR_cat         7   /* retired: open() + read() */
@@ -22,6 +22,7 @@
 #define NR_fstat       14  /* fstat(fd, struct stat *) */
 #define NR_getpid      15
 #define NR_getdents    16  /* getdents(fd, buf, max) */
+#define NR_waitpid     17  /* waitpid(pid, &status, 0); pid==-1 = any child */
 
 /* open() flags (only the access mode is honoured; the filesystem is
    read-only) */

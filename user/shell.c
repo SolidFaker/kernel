@@ -55,17 +55,27 @@ static int fork(void)
     return a;
 }
 
-static int exec(const char *path)
+static int execve(const char *path, char *const argv[], char *const envp[])
 {
     int a;
     __asm__ volatile("int $0x80" : "=a" (a)
-                     : "0" (NR_exec), "b" (path) : "memory");
+                     : "0" (NR_exec), "b" (path), "c" (argv), "d" (envp)
+                     : "memory");
     return a;
 }
 
-static void exit(void)
+static void exit(int status)
 {
-    __asm__ volatile("int $0x80" : : "a" (NR_exit) : "memory");
+    __asm__ volatile("int $0x80" : : "a" (NR_exit), "b" (status) : "memory");
+}
+
+static int waitpid(int pid, int *status)
+{
+    int a;
+    __asm__ volatile("int $0x80" : "=a" (a)
+                     : "0" (NR_waitpid), "b" (pid), "c" (status)
+                     : "memory");
+    return a;
 }
 
 static int chtty(int n)
@@ -104,6 +114,32 @@ static int streq(const char *a, const char *b)
 static void print(const char *s)
 {
     write(1, s, strlen(s));
+}
+
+static void put_char(char c)
+{
+    write(1, &c, 1);
+}
+
+static void print_dec(int v)
+{
+    char b[12];
+    int i = 0;
+    if (v == 0) {
+        put_char('0');
+        return;
+    }
+    if (v < 0) {
+        put_char('-');
+        v = -v;
+    }
+    while (v > 0) {
+        b[i++] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    while (i > 0) {
+        put_char(b[--i]);
+    }
 }
 
 static char line[128];
@@ -221,19 +257,29 @@ static void run_cmd(const char *cmd, const char *arg)
         }
         int pid = fork();
         if (pid == 0) {
-            if (exec(arg) < 0) {
+            char *const argv2[2] = { (char *)arg, 0 };
+            if (execve(arg, argv2, 0) < 0) {
                 print("exec failed: ");
                 print(arg);
                 echo_char('\n');
             }
-            exit();
+            exit(127);
         }
-        print("started\n");
+        // foreground execution: wait for the child and show its status
+        int st = 0;
+        int w = waitpid(pid, &st);
+        if (w == pid) {
+            print("status ");
+            print_dec(st);
+            echo_char('\n');
+        } else {
+            print("waitpid failed\n");
+        }
         return;
     }
     if (streq(cmd, "exit")) {
         print("bye\n");
-        exit();
+        exit(0);
     }
     print("unknown command: ");
     print(cmd);
@@ -251,6 +297,7 @@ void _start(void)
     run_cmd("ls", "");
     run_cmd("cat", "README");
     run_cmd("run", "hello.elf");
+    run_cmd("ps", "");
 #endif
 
     for (;;) {

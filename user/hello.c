@@ -19,9 +19,18 @@ static int fork(void)
     return a;
 }
 
-static void exit(void)
+static void exit(int status)
 {
-    __asm__ volatile("int $0x80" : : "a" (NR_exit) : "memory");
+    __asm__ volatile("int $0x80" : : "a" (NR_exit), "b" (status) : "memory");
+}
+
+static int waitpid(int pid, int *status)
+{
+    int a;
+    __asm__ volatile("int $0x80" : "=a" (a)
+                     : "0" (NR_waitpid), "b" (pid), "c" (status)
+                     : "memory");
+    return a;
 }
 
 static int slen(const char *s)
@@ -44,8 +53,10 @@ void _start(void)
     int pid = fork();
     if (pid == 0) {
         print("user elf child\n");
-    } else {
-        print("user elf parent\n");
+        exit(0);
     }
-    exit();
+    int st = 0;
+    waitpid(pid, &st);
+    print("user elf parent\n");
+    exit(7);
 }

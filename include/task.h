@@ -30,6 +30,7 @@ struct task_struct {
     u32 time_slice;
     u32 flags;
     u8 priority;
+    u32 exit_code;               // set by exit(), read by waitpid()
     void *kernel_stack;
     void *user_stack;
     enum task_state state;
