@@ -170,6 +170,16 @@ int mkdir(const char *path, mode_t mode)
     return chk(sys3(NR_mkdir, (int)path, (int)mode, 0));
 }
 
+int chmod(const char *path, mode_t mode)
+{
+    return chk(sys3(NR_chmod, (int)path, (int)mode, 0));
+}
+
+int fchmod(int fd, mode_t mode)
+{
+    return chk(sys3(NR_fchmod, fd, (int)mode, 0));
+}
+
 int rename(const char *oldp, const char *newp)
 {
     return chk(sys3(NR_rename, (int)oldp, (int)newp, 0));

@@ -85,6 +85,8 @@
 #define NR_thread_wait   77
 #define NR_futex         78
 #define NR_ping          79
+#define NR_chmod         80
+#define NR_fchmod        81
 
 /* open() flags (only the access mode is honoured; the filesystem is
    read-only) */

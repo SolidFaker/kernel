@@ -159,6 +159,7 @@ static void ri_init_node(struct ramfs_inode *ri, const char *name,
     memset((u8 *)ri, 0, sizeof(*ri));
     strcpy(ri->node.name, (char *)name);
     ri->node.inode = ramfs_next_ino++;
+    ri->node.mask = is_dir ? 0755 : 0644;
     ri->parent = parent;
     if (is_dir) {
         ri->node.flags = FS_DIRECTORY;

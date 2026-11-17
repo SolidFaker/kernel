@@ -55,6 +55,28 @@ static u32 cursor_row;
 static u32 cursor_col;
 static int cursor_on = 1;
 
+static inline void fb_fill_words(u32 *dst, u32 color, u32 n)
+{
+    if (!n) {
+        return;
+    }
+    asm volatile("cld; rep stosl"
+                 : "+D"(dst), "+c"(n)
+                 : "a"(color)
+                 : "memory");
+}
+
+static inline void fb_copy_words(u32 *dst, const u32 *src, u32 n)
+{
+    if (!n) {
+        return;
+    }
+    asm volatile("cld; rep movsl"
+                 : "+D"(dst), "+S"(src), "+c"(n)
+                 :
+                 : "memory");
+}
+
 static inline void put_px(int x, int y, u32 color)
 {
     if (x >= 0 && y >= 0 && x < SCR_W && y < SCR_H) {
@@ -66,20 +88,16 @@ static void fill_rect(int x, int y, int w, int h, u32 color)
 {
     int i, j;
 
+    (void)i;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > SCR_W) { w = SCR_W - x; }
+    if (y + h > SCR_H) { h = SCR_H - y; }
     if (w <= 0 || h <= 0) {
         return;
     }
     for (j = 0; j < h; j++) {
-        int py = y + j;
-        if (py < 0 || py >= SCR_H) {
-            continue;
-        }
-        for (i = 0; i < w; i++) {
-            int px = x + i;
-            if (px >= 0 && px < SCR_W) {
-                fb[py * fb_pitch + px] = color;
-            }
-        }
+        fb_fill_words(fb + (u32)(y + j) * fb_pitch + x, color, (u32)w);
     }
 }
 
@@ -121,13 +139,46 @@ static void draw_char(int x, int y, u8 ch, u32 color, int scale)
     if (ch >= 128) {
         ch = '?';
     }
+    if (x < 0 || y < 0 || x + 8 * scale > SCR_W ||
+            y + 8 * scale > SCR_H) {
+        glyph = font8x8[ch];
+        for (row = 0; row < 8; row++) {
+            u8 bits = glyph[row];
+            for (col = 0; col < 8; col++) {
+                if (bits & (1 << col)) {
+                    fill_rect(x + col * scale, y + row * scale,
+                              scale, scale, color);
+                }
+            }
+        }
+        return;
+    }
+
     glyph = font8x8[ch];
-    for (row = 0; row < 8; row++) {
-        u8 bits = glyph[row];
-        for (col = 0; col < 8; col++) {
-            if (bits & (1 << col)) {
-                fill_rect(x + col * scale, y + row * scale,
-                          scale, scale, color);
+    if (scale == 2) {
+        for (row = 0; row < 8; row++) {
+            u8 bits = glyph[row];
+            if (!bits) {
+                continue;
+            }
+            u32 *r0 = fb + (u32)(y + row * 2) * fb_pitch + x;
+            u32 *r1 = r0 + fb_pitch;
+            for (col = 0; col < 8; col++) {
+                if (bits & (1 << col)) {
+                    int px = col * 2;
+                    r0[px] = r0[px + 1] = color;
+                    r1[px] = r1[px + 1] = color;
+                }
+            }
+        }
+    } else {
+        for (row = 0; row < 8; row++) {
+            u8 bits = glyph[row];
+            u32 *r = fb + (u32)(y + row * scale) * fb_pitch + x;
+            for (col = 0; col < 8; col++) {
+                if (bits & (1 << col)) {
+                    r[col * scale] = color;
+                }
             }
         }
     }
@@ -263,6 +314,33 @@ void fbcon_clear(struct tty *t)
         return;
     }
     fill_rect(GRID_X, GRID_Y, GRID_W, GRID_H, palette16[0]);
+}
+
+void fbcon_draw_row(struct tty *t, u32 row)
+{
+    u32 col;
+
+    if (!ready || !t || row >= TTY_ROWS) {
+        return;
+    }
+    for (col = 0; col < TTY_COLS; col++) {
+        fbcon_draw_cell(t, row, col);
+    }
+}
+
+void fbcon_scroll(struct tty *t)
+{
+    u32 *dst, *src, n;
+
+    if (!ready || !t || t != cur || gfx_is_active()) {
+        return;
+    }
+    dst = fb + (u32)GRID_Y * fb_pitch;
+    src = fb + (u32)(GRID_Y + CELL_H) * fb_pitch;
+    n = (u32)(GRID_H - CELL_H) * fb_pitch;
+    fb_copy_words(dst, src, n);
+    fbcon_draw_row(t, TTY_ROWS - 1);
+    fbcon_cursor_update(t);
 }
 
 static void draw_cursor_bar(struct tty *t)

@@ -27,8 +27,8 @@ the `__linux__` macro, then copied to `build/bin/toybox.elf` with OSABI patched 
 `0xff`.
 
 - default init execs `toybox sh -i`
-- compiled applets: `sh echo pwd ls cat true false mkdir rmdir rm touch sleep env
-  printf uname test`
+- compiled applets: `sh echo pwd ls cat true false mkdir rmdir rm touch chmod
+  sleep env printf uname test`
 - native `shell.elf` is kept as a fallback if toybox is unavailable
 - `user/toyrun.c` can launch toybox manually
 

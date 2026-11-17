@@ -42,8 +42,12 @@ void kernel_start(void)
     // multi task init
     init_task();
 
-    // filesystem init
-    fs_root = init_vfs();
+    // filesystem init: the journal snapshot is authoritative once created
+    if (jfs_has_snapshot()) {
+        fs_root = init_vfs_empty();
+    } else {
+        fs_root = init_vfs();
+    }
     jfs_init();
 
     // initialises system call

@@ -215,7 +215,8 @@ static void fill_stat(struct stat *st, struct fs_node *node)
     }
     st->st_ino = node->inode;
     st->st_mode = ((node->flags & 0x7) == FS_DIRECTORY) ?
-        (S_IFDIR | 0755) : (S_IFREG | 0444);
+        (S_IFDIR | (node->mask & 07777)) :
+        (S_IFREG | (node->mask & 07777));
     st->st_nlink = 1;
     st->st_uid = node->uid;
     st->st_gid = node->gid;
@@ -854,6 +855,7 @@ static int sys_open(struct trap_frame *frame)
     char abspath[160];
     int created = 0;
     u32 acc;
+    u32 mode = current->linux_abi ? (frame->edx & 07777) : 0;
     int fd, r;
 
     if ((u32)name < 0x1000) {
@@ -881,6 +883,9 @@ static int sys_open(struct trap_frame *frame)
                 return -ENOSPC;
             }
             created = 1;
+        if (current->linux_abi) {
+            node->mask = mode;
+        }
         } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
             return -EEXIST;
         }
@@ -929,7 +934,7 @@ static int sys_open(struct trap_frame *frame)
         copy_string(o->path, abspath, sizeof(o->path));
     }
     if (created && o->path[0]) {
-        jfs_log(JFS_CREATE_FILE, o->path, 0, 0, 0, 0);
+        jfs_log(JFS_CREATE_FILE, o->path, 0, 0x80000000u | (node->mask & 07777), 0, 0);
     }
 
     current->fds[fd].used = 1;
@@ -2457,6 +2462,37 @@ static int sys_ping(struct trap_frame *frame)
     return net_ping(ip, timeout);
 }
 
+static int sys_chmod(struct trap_frame *frame)
+{
+    const char *path = (const char *)(frame->ebx);
+    u32 mode = frame->ecx & 07777;
+    struct fs_node *node;
+    char abs[160];
+    int r = resolve_path(path, &node);
+    if (r < 0) {
+        return r;
+    }
+    node->mask = mode;
+    if (path_normalize(path, abs, sizeof(abs)) == 0) {
+        jfs_log(JFS_CHMOD, abs, 0, mode, 0, 0);
+    }
+    return 0;
+}
+
+static int sys_fchmod(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    u32 mode = frame->ecx & 07777;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) {
+        return -EBADF;
+    }
+    current->fds[fd].node->mask = mode;
+    if (current->fds[fd].ofd && current->fds[fd].ofd->path[0]) {
+        jfs_log(JFS_CHMOD, current->fds[fd].ofd->path, 0, mode, 0, 0);
+    }
+    return 0;
+}
+
 static int sys_mkdir(struct trap_frame *frame)
 {
     const char *path = (const char *)(frame->ebx);
@@ -2477,13 +2513,19 @@ static int sys_mkdir(struct trap_frame *frame)
     if (finddir_fs(parent, base)) {
         return -EEXIST;
     }
-    if (!create_fs(parent, base, 1)) {
-        return -ENOSPC;
-    }
     {
-        char abs[160];
-        if (path_normalize(path, abs, sizeof(abs)) == 0) {
-            jfs_log(JFS_CREATE_DIR, abs, 0, 0, 0, 0);
+        struct fs_node *node = create_fs(parent, base, 1);
+        u32 mode = frame->ecx & 07777;
+        if (!node) {
+            return -ENOSPC;
+        }
+        node->mask = mode;
+        {
+            char abs[160];
+            if (path_normalize(path, abs, sizeof(abs)) == 0) {
+                jfs_log(JFS_CREATE_DIR, abs, 0,
+                        0x80000000u | (node->mask & 07777), 0, 0);
+            }
         }
     }
     return 0;
@@ -2825,6 +2867,8 @@ void init_syscall()
     syscalls[NR_rename] = &sys_rename;
     syscalls[NR_truncate] = &sys_truncate;
     syscalls[NR_ftruncate] = &sys_ftruncate;
+    syscalls[NR_chmod] = &sys_chmod;
+    syscalls[NR_fchmod] = &sys_fchmod;
     syscalls[NR_mmap] = &sys_mmap;
     syscalls[NR_munmap] = &sys_munmap;
     syscalls[NR_mprotect] = &sys_mprotect;
@@ -3189,7 +3233,8 @@ static int linux_statx(struct trap_frame *frame)
     }
     memset((u8 *)stx, 0, 256);
     mode = ((node->flags & 0x7) == FS_DIRECTORY) ?
-        (S_IFDIR | 0755) : (S_IFREG | 0444);
+        (S_IFDIR | (node->mask & 07777)) :
+        (S_IFREG | (node->mask & 07777));
     size = node->length;
     ino = node->inode;
     now = tick / TIMER_HZ;
@@ -3307,6 +3352,8 @@ static int linux_openat(struct trap_frame *frame)
 }
 
 static int tty_canon_read(struct tty *t, u8 *buf, u32 count);
+static int linux_abs_from_dir(int dirfd, const char *path, char *abs,
+                              u32 max);
 static int linux_mkdirat(struct trap_frame *frame);
 static int linux_unlinkat(struct trap_frame *frame);
 static int linux_renameat(struct trap_frame *frame);
@@ -3339,7 +3386,20 @@ static int linux_dispatch(struct trap_frame *frame)
     case 19: return sys_lseek(frame);
     case 20: return sys_getpid(frame);
     case 24: case 47: case 49: case 50: return 0;
-    case 15: case 94: return 0;
+    case 15: return sys_chmod(frame);
+    case 94: return sys_fchmod(frame);
+    case 306: {
+        char abs[160];
+        int r = linux_abs_from_dir((int)frame->ebx,
+                                   (const char *)frame->ecx,
+                                   abs, sizeof(abs));
+        if (r < 0) {
+            return r;
+        }
+        frame->ebx = (u32)abs;
+        frame->ecx = frame->edx;
+        return sys_chmod(frame);
+    }
     case 27: return sys_alarm(frame);
     case 33: return sys_access(frame);
     case 37: return sys_kill(frame);
@@ -3462,6 +3522,7 @@ static int linux_mkdirat(struct trap_frame *frame)
         return r;
     }
     frame->ebx = (u32)abs;
+    frame->ecx = frame->edx;
     return sys_mkdir(frame);
 }
 

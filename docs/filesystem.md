@@ -21,33 +21,53 @@
 `fs/ofd.c` implements shared open file descriptions used by `dup`/`fork`; descriptors
 track their absolute path so write/truncate operations can be journaled.
 
-## Persistent journal (JFS)
+## Log-structured filesystem (JFS2)
 
-`fs/jfs.c` adds a write-ahead log on the ATA disk:
+`fs/jfs.c` turns the writable tree into a persistent, disk-backed
+log-structured filesystem.
 
-- journal area starts at LBA 8192, 8 MiB
+### Layout
+
+- superblock at LBA 8192
+- two 8 MiB journal regions (region A and B); records are appended to the active
+  region
 - records: `CREATE_FILE`, `CREATE_DIR`, `WRITE`, `TRUNCATE`, `UNLINK`, `RMDIR`,
-  `RENAME`
-- each record has path/path2, offset, length, sequence number and CRC32
-- commit protocol: invalidate header → write data sectors → write committed header →
+  `RENAME`, `CHMOD`
+- each record stores path/path2, offset, length, sequence number and CRC32
+- `CREATE_*` and `CHMOD` records carry permission bits; checkpoints preserve modes
+- commit protocol: invalidate header → write data sectors → committed header →
   `FLUSH CACHE`
-- at boot: import myfs into ramfs, then replay valid records in order
-- journal writes are hooked into open/write/truncate/mkdir/rmdir/unlink/rename
 
-Persistence test (same `build/80m.img` across two boots):
+### Boot and recovery
+
+1. If the superblock has no valid snapshot, import the read-only myfs image into
+   ramfs (boot/module partition)
+2. If a snapshot exists, start from an empty ramfs and rebuild it only from the
+   journal
+3. Scan the active region up to the checkpointed head, validate CRCs and replay
+   records in order
+4. When the region is over 75% full (or on the first boot), checkpoint the whole
+   tree into the inactive region and switch the superblock atomically
+
+After the first checkpoint the journal alone is authoritative: adding, modifying,
+renaming and deleting files persists across reboots, including deleting files that
+came from the original myfs image. The 16-bit loader still uses the raw myfs boot
+area for `kernel.elf`; that is a boot partition, not the root filesystem.
+
+### Persistence test
 
 ```sh
 mkdir /docs
-mkdir /docs/sub
 echo hi > /docs/a
+rm -f /README
 # reboot
-ls /docs       # a sub
-cat /docs/a    # hi
+ls /          # README is gone; docs is present
+cat /docs/a   # hi
 ```
 
-Limitations:
+### Limitations
 
-- append-only; no checkpoint/compaction yet
-- once 8 MiB is full, further journaled writes return `ENOSPC`
-- `make all` recreates `build/80m.img`; persistence is across boots of the same image,
-  not across rebuilds
+- one checkpoint must fit in an 8 MiB region; very large trees can hit `ENOSPC`
+- superblock is updated per write (durable but slower than a batched journal)
+- no fsync/fdatasync; writes become durable when the journal record and flush
+  complete

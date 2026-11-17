@@ -40,7 +40,18 @@ static u32 myfs_read_entry(struct myfs_entry *e, u32 offset, u32 size,
     return size;
 }
 
-struct fs_node *init_vfs()
+struct fs_node *init_vfs_empty(void)
+{
+    fs_root = init_ramfs();
+    if (!fs_root) {
+        ERROR("RAMFS INIT FAILED!");
+        return 0;
+    }
+    create_fs(fs_root, "dev", 1);
+    return fs_root;
+}
+
+void vfs_import_myfs(void)
 {
     u8 first[SECTOR_SIZE];
     struct myfs_struct *hdr;
@@ -48,30 +59,25 @@ struct fs_node *init_vfs()
     u32 total, i;
     u8 *image;
 
+    if (!fs_root) {
+        return;
+    }
     readseg(first, SECTOR_SIZE, 10 * SECTOR_SIZE);
     hdr = (struct myfs_struct *)first;
     if (hdr->magic != MYFS_MAGIC) {
         ERROR("RAMDISK INIT FAILED!");
-        return 0;
+        return;
     }
-
     total = sizeof(struct myfs_struct) +
             hdr->entry_num * sizeof(struct myfs_entry);
     image = (u8 *)kmalloc(total);
     if (!image) {
         ERROR("RAMDISK OUT OF MEMORY!");
-        return 0;
+        return;
     }
     readseg(image, total, 10 * SECTOR_SIZE);
     hdr = (struct myfs_struct *)image;
     ent = (struct myfs_entry *)(image + sizeof(struct myfs_struct));
-
-    fs_root = init_ramfs();
-    if (!fs_root) {
-        ERROR("RAMFS INIT FAILED!");
-        return 0;
-    }
-    create_fs(fs_root, "dev", 1);
 
     for (i = 1; i < hdr->entry_num; i++) {
         char name[sizeof(ent[i].entry_name) + 1];
@@ -98,7 +104,14 @@ struct fs_node *init_vfs()
         write_fs(node, 0, n, data);
         kfree(data);
     }
-
     kfree(image);
+}
+
+struct fs_node *init_vfs()
+{
+    if (!init_vfs_empty()) {
+        return 0;
+    }
+    vfs_import_myfs();
     return fs_root;
 }

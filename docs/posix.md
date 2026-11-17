@@ -16,7 +16,9 @@ use the in-tree libc in `user/libc/` (`crt0.o + libc.a`).
 - `open/close/read/write/lseek/fstat`, `stat`, `access`
 - `chdir/getcwd`, path resolution with `.`/`..`, absolute and relative paths
 - `mkdir/rmdir/unlink/rename/truncate/ftruncate`
+- `chmod`/`fchmod`/`fchmodat`; permission bits are stored per node and persisted
 - `open` flags: `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, `O_NONBLOCK`
+- creation modes and chmod bits are reported by `stat`/`statx` and journaled
 - writable ramfs imported from the read-only myfs image at boot
 
 ## Memory and time

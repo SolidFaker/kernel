@@ -6,7 +6,7 @@
 #define JFS_LBA        8192          /* journal area start (4 MiB) */
 #define JFS_SECTORS    16384         /* 8 MiB journal */
 #define JFS_REC_MAGIC  0x4A465231    /* "JFR1" */
-#define JFS_SUPER_MAGIC 0x4A465331   /* "JFS1" */
+#define JFS_SUPER_MAGIC 0x4A465332   /* "JFS2" */
 
 #define JFS_CREATE_FILE 1
 #define JFS_CREATE_DIR  2
@@ -15,6 +15,7 @@
 #define JFS_UNLINK      5
 #define JFS_RMDIR       6
 #define JFS_RENAME      7
+#define JFS_CHMOD       8
 
 struct jfs_rec {
     u32 magic;
@@ -28,6 +29,7 @@ struct jfs_rec {
     u8 pad[168];
 } __PACKED;
 
+int jfs_has_snapshot(void);
 void jfs_init(void);
 int jfs_log(u32 type, const char *path, const char *path2, u32 offset,
             const u8 *data, u32 len);

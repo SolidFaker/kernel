@@ -99,7 +99,7 @@ static void scroll(struct tty *_tty)
     _tty->cursor_y = TTY_ROWS - 1;
 
     if (_tty == tty_cur) {
-        fbcon_redraw_all();
+        fbcon_scroll(_tty);
     }
 }
 
@@ -207,7 +207,7 @@ void flush_line(struct tty *_tty, u8 line)
     }
     _tty->cursor_x = 0;
     if (_tty == tty_cur) {
-        fbcon_redraw_all();
+        fbcon_draw_row(_tty, line);
     }
 }
 

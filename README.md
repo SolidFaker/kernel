@@ -9,7 +9,8 @@ stack.
 
 - VBE `1280x1024x32` graphical terminal with window chrome, ANSI colors and
   multi-tty support
-- Write-ahead journal for the writable ramfs; user changes survive a reboot
+- Log-structured on-disk filesystem (JFS2) with two-region checkpoints; files,
+  directories and deletions survive reboots
 - POSIX-style processes, file descriptors, pipes, mmap, signals, termios,
   AF_UNIX/AF_INET sockets, `poll`/`select` and pthread-style threads
 - In-tree libc, plus a musl 1.2.5 port and **toybox sh** as the default shell

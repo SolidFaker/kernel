@@ -23,6 +23,16 @@ The 16-bit loader sets VBE mode `1280x1024x32` with a linear framebuffer and wri
 `drivers/display.c` keeps the tty cell grid in RAM and calls `fbcon` for rendering.
 `drivers/tty.c` handles tty selection and cursor restoration.
 
+## Scroll performance
+
+- scrolling no longer repaints the desktop/window/all cells
+- `fbcon_scroll` moves the framebuffer rows with `rep movsl` and repaints only the
+  newly exposed bottom cell row plus the cursor
+- `fill_rect` clips once and fills each scanline with `rep stosl`
+- glyphs are expanded directly into the framebuffer instead of one `fill_rect` call
+  per pixel
+- `flush_line` redraws a single row instead of the whole console
+
 ## `gfx` demo
 
 `drivers/graphic.c` provides a logical 320x200x256 canvas:

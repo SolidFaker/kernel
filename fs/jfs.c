@@ -1,32 +1,79 @@
-// Persistent write-ahead journal for the in-memory ramfs.
+// Persistent log-structured filesystem layer for the in-memory tree.
 //
-// The read-only myfs image is imported into ramfs at boot, then committed
-// journal records are replayed in order. This makes user changes survive a
-// reboot without needing an in-place on-disk filesystem.
+// Records are appended to one of two 8 MiB journal regions. At boot the
+// active region is replayed; when a region fills up (or on the first
+// boot) the current tree is checkpointed into the other region, so the
+// journal becomes the authoritative on-disk filesystem.
 
 #include "jfs.h"
 #include "errno.h"
 #include "drivers/hd.h"
-#include "drivers/tty.h"
 #include "fs.h"
 #include "mm.h"
 #include "string.h"
 #include "tools.h"
+#include "vfs.h"
 
-#define JFS_MAX_DATA    65536
+#define JFS_REGION_CAP (JFS_SECTORS - 1)
 
 struct jfs_super {
     u32 magic;
     u32 version;
+    u32 active;
     u32 head;
     u32 seq;
+    u32 snapshot;
     u32 crc;
-    u8  pad[492];
+    u8  pad[484];
 } __PACKED;
 
-static u32 jfs_head = 1;
+static u32 jfs_active;
+static u32 jfs_head;
 static u32 jfs_seq = 1;
 static int jfs_ready;
+
+static u32 region_base(u32 active)
+{
+    return JFS_LBA + 1 + active * JFS_SECTORS;
+}
+
+static void jfs_read_sector(u32 sec, u8 *buf)
+{
+    readseg(buf, SECTOR_SIZE, sec * SECTOR_SIZE);
+}
+
+static void jfs_write_sector(u32 sec, const u8 *buf)
+{
+    writeseg(buf, SECTOR_SIZE, sec * SECTOR_SIZE);
+}
+
+static int read_super(struct jfs_super *sb)
+{
+    jfs_read_sector(JFS_LBA, (u8 *)sb);
+    return sb->magic == JFS_SUPER_MAGIC && sb->version == 2;
+}
+
+static void write_super(void)
+{
+    u8 sector[SECTOR_SIZE];
+    struct jfs_super *sb = (struct jfs_super *)sector;
+
+    memset(sector, 0, SECTOR_SIZE);
+    sb->magic = JFS_SUPER_MAGIC;
+    sb->version = 2;
+    sb->active = jfs_active;
+    sb->head = jfs_head;
+    sb->seq = jfs_seq;
+    sb->snapshot = 1;
+    jfs_write_sector(JFS_LBA, sector);
+    hd_flush();
+}
+
+int jfs_has_snapshot(void)
+{
+    struct jfs_super sb;
+    return read_super(&sb) && sb.snapshot != 0;
+}
 
 static u32 crc32_update(u32 crc, const u8 *p, u32 len)
 {
@@ -55,16 +102,6 @@ static u32 rec_crc(struct jfs_rec *r, const u8 *data)
     r->magic = magic;
     r->crc = stored;
     return c;
-}
-
-static void jfs_read_sector(u32 sec, u8 *buf)
-{
-    readseg(buf, SECTOR_SIZE, sec * SECTOR_SIZE);
-}
-
-static void jfs_write_sector(u32 sec, const u8 *buf)
-{
-    writeseg(buf, SECTOR_SIZE, sec * SECTOR_SIZE);
 }
 
 static struct fs_node *lookup_path(const char *path)
@@ -159,7 +196,10 @@ static void jfs_apply(struct jfs_rec *r, u8 *data)
             return;
         }
         if (split_parent(r->path, &dir, name) == 0) {
-            create_fs(dir, name, r->type == JFS_CREATE_DIR);
+            node = create_fs(dir, name, r->type == JFS_CREATE_DIR);
+            if (node && (r->offset & 0x80000000u)) {
+                node->mask = r->offset & 07777;
+            }
         }
         break;
     case JFS_WRITE:
@@ -180,6 +220,12 @@ static void jfs_apply(struct jfs_rec *r, u8 *data)
             unlink_fs(dir, name);
         }
         break;
+    case JFS_CHMOD:
+        node = lookup_path(r->path);
+        if (node) {
+            node->mask = r->offset & 07777;
+        }
+        break;
     case JFS_RENAME:
         {
             struct fs_node *nd;
@@ -193,48 +239,194 @@ static void jfs_apply(struct jfs_rec *r, u8 *data)
     }
 }
 
+static int jfs_emit(u32 base, u32 *hp, u32 *sp, u32 type,
+                    const char *path, const char *path2, u32 offset,
+                    const u8 *data, u32 len)
+{
+    u8 sector[SECTOR_SIZE];
+    struct jfs_rec *r = (struct jfs_rec *)sector;
+    u32 sectors, done, c;
+
+    if (!path || strlen(path) >= sizeof(r->path) ||
+            (path2 && strlen(path2) >= sizeof(r->path2)) ||
+            len > 65536) {
+        return -EINVAL;
+    }
+    sectors = 1 + (len + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    if (*hp + sectors > JFS_REGION_CAP) {
+        return -ENOSPC;
+    }
+
+    memset(sector, 0, SECTOR_SIZE);
+    jfs_write_sector(base + *hp, sector);
+
+    done = 0;
+    while (done < len) {
+        u32 chunk = SECTOR_SIZE;
+        if (chunk > len - done) {
+            chunk = len - done;
+        }
+        memset(sector, 0, SECTOR_SIZE);
+        memcpy(sector, (const u8 *)data + done, chunk);
+        jfs_write_sector(base + *hp + 1 + done / SECTOR_SIZE, sector);
+        done += chunk;
+    }
+
+    memset(sector, 0, SECTOR_SIZE);
+    r->type = type;
+    r->seq = *sp;
+    r->offset = offset;
+    r->data_len = len;
+    memcpy((u8 *)r->path, (const u8 *)path, strlen(path) + 1);
+    if (path2) {
+        memcpy((u8 *)r->path2, (const u8 *)path2, strlen(path2) + 1);
+    }
+    c = rec_crc(r, data ? data : (u8 *)"");
+    r->crc = c;
+    r->magic = JFS_REC_MAGIC;
+    jfs_write_sector(base + *hp, sector);
+    hd_flush();
+
+    *hp += sectors;
+    (*sp)++;
+    return 0;
+}
+
+static int snapshot_dir(struct fs_node *dir, const char *prefix,
+                        u32 base, u32 *hp, u32 *sp, u8 *data)
+{
+    u32 index;
+    struct dirent *de;
+
+    for (index = 0;; index++) {
+        struct fs_node *child;
+        char path[160];
+        u32 pl, nl;
+
+        de = readdir_fs(dir, index);
+        if (!de) {
+            break;
+        }
+        child = finddir_fs(dir, de->name);
+        if (!child) {
+            continue;
+        }
+        pl = (u32)strlen(prefix);
+        nl = (u32)strlen(de->name);
+        if (pl + nl + 2 > sizeof(path)) {
+            return -ERANGE;
+        }
+        if (pl == 0) {
+            path[0] = '/';
+            memcpy((u8 *)(path + 1), (const u8 *)de->name, nl + 1);
+        } else {
+            memcpy((u8 *)path, (const u8 *)prefix, pl);
+            path[pl] = '/';
+            memcpy((u8 *)(path + pl + 1), (const u8 *)de->name, nl + 1);
+        }
+
+        if ((child->flags & 0x7) == FS_DIRECTORY) {
+            int r = jfs_emit(base, hp, sp, JFS_CREATE_DIR, path, 0,
+                             0x80000000u | (child->mask & 07777), 0, 0);
+            if (r < 0) {
+                return r;
+            }
+            r = snapshot_dir(child, path, base, hp, sp, data);
+            if (r < 0) {
+                return r;
+            }
+        } else {
+            u32 off = 0;
+            int r = jfs_emit(base, hp, sp, JFS_CREATE_FILE, path, 0,
+                             0x80000000u | (child->mask & 07777), 0, 0);
+            if (r < 0) {
+                return r;
+            }
+            while (off < child->length) {
+                u32 n = child->length - off;
+                if (n > 32768) {
+                    n = 32768;
+                }
+                n = read_fs(child, off, n, data);
+                if (n == 0) {
+                    break;
+                }
+                r = jfs_emit(base, hp, sp, JFS_WRITE, path, 0, off,
+                             data, n);
+                if (r < 0) {
+                    return r;
+                }
+                off += n;
+            }
+        }
+    }
+    return 0;
+}
+
+static int jfs_compact(void)
+{
+    u8 *buf;
+    u32 target = jfs_active ^ 1;
+    u32 head = 0, seq = jfs_seq;
+    int r;
+
+    buf = (u8 *)kmalloc(32768);
+    if (!buf) {
+        return -ENOMEM;
+    }
+    r = snapshot_dir(fs_root, "", region_base(target), &head, &seq, buf);
+    kfree(buf);
+    if (r < 0) {
+        return r;
+    }
+    jfs_active = target;
+    jfs_head = head;
+    jfs_seq = seq;
+    write_super();
+    return 0;
+}
+
 void jfs_init(void)
 {
-    u8 *sector = (u8 *)kmalloc(SECTOR_SIZE);
-    struct jfs_super *sb = (struct jfs_super *)sector;
-    u32 sec, replayed = 0;
+    struct jfs_super sb;
+    u32 base, sec, replayed = 0, limit;
 
-    if (!sector) {
-        return;
-    }
-    jfs_read_sector(JFS_LBA, sector);
-    if (sb->magic != JFS_SUPER_MAGIC) {
-        memset(sector, 0, SECTOR_SIZE);
-        sb->magic = JFS_SUPER_MAGIC;
-        sb->version = 1;
-        sb->head = 1;
-        sb->seq = 1;
-        jfs_write_sector(JFS_LBA, sector);
-        hd_flush();
-        jfs_head = 1;
+    if (!read_super(&sb)) {
+        jfs_active = 0;
+        jfs_head = 0;
         jfs_seq = 1;
         jfs_ready = 1;
-        kfree(sector);
+        write_super();
+        jfs_compact();
         return;
     }
 
-    sec = 1;
-    while (sec < JFS_SECTORS) {
+    jfs_active = sb.active & 1;
+    jfs_seq = sb.seq ? sb.seq : 1;
+    limit = sb.head;
+    if (limit > JFS_REGION_CAP) {
+        limit = JFS_REGION_CAP;
+    }
+    base = region_base(jfs_active);
+
+    sec = 0;
+    while (sec < limit) {
+        u8 sector[SECTOR_SIZE];
         struct jfs_rec hdr;
         struct jfs_rec *r = (struct jfs_rec *)sector;
         u8 *data = 0;
         u32 sectors, done;
 
-        jfs_read_sector(JFS_LBA + sec, sector);
+        jfs_read_sector(base + sec, sector);
         if (r->magic != JFS_REC_MAGIC) {
             break;
         }
         hdr = *r;
-        if (hdr.data_len > JFS_MAX_DATA) {
+        if (hdr.data_len > 65536) {
             break;
         }
         sectors = 1 + (hdr.data_len + SECTOR_SIZE - 1) / SECTOR_SIZE;
-        if (sec + sectors > JFS_SECTORS) {
+        if (sec + sectors > limit) {
             break;
         }
         if (hdr.data_len) {
@@ -248,7 +440,7 @@ void jfs_init(void)
                 if (chunk > hdr.data_len - done) {
                     chunk = hdr.data_len - done;
                 }
-                jfs_read_sector(JFS_LBA + sec + 1 + done / SECTOR_SIZE,
+                jfs_read_sector(base + sec + 1 + done / SECTOR_SIZE,
                                 sector);
                 memcpy(data + done, sector, chunk);
                 done += chunk;
@@ -261,72 +453,49 @@ void jfs_init(void)
         jfs_apply(&hdr, data);
         jfs_seq = hdr.seq + 1;
         replayed++;
-        if (data) {
-            kfree(data);
-        }
+        if (data) kfree(data);
         sec += sectors;
     }
     jfs_head = sec;
     jfs_ready = 1;
-    if (replayed) {
-        printk("jfs: replayed %d records\n", (int)replayed);
+
+    if (sb.snapshot && replayed == 0) {
+        /* Snapshot metadata says there should be records; fall back. */
+        vfs_import_myfs();
+        jfs_compact();
+        return;
     }
-    kfree(sector);
+    if (!sb.snapshot || jfs_head * 4 > JFS_REGION_CAP * 3) {
+        jfs_compact();
+    }
 }
 
 int jfs_log(u32 type, const char *path, const char *path2, u32 offset,
             const u8 *data, u32 len)
 {
-    u8 sector[SECTOR_SIZE];
-    struct jfs_rec *r = (struct jfs_rec *)sector;
-    u32 sectors, done;
-    u32 c;
+    u32 flags;
+    u32 sectors;
+    int r;
 
     if (!jfs_ready) {
         return 0;
     }
-    if (!path || strlen(path) >= sizeof(r->path) ||
-            (path2 && strlen(path2) >= sizeof(r->path2)) ||
-            len > JFS_MAX_DATA) {
-        return -EINVAL;
-    }
+    flags = local_irq_save();
     sectors = 1 + (len + SECTOR_SIZE - 1) / SECTOR_SIZE;
-    if (jfs_head + sectors > JFS_SECTORS) {
-        return -ENOSPC;
-    }
-
-    memset(sector, 0, SECTOR_SIZE);
-    jfs_write_sector(JFS_LBA + jfs_head, sector);
-    done = 0;
-    while (done < len) {
-        u32 chunk = SECTOR_SIZE;
-        if (chunk > len - done) {
-            chunk = len - done;
+    if (jfs_head + sectors > JFS_REGION_CAP) {
+        r = jfs_compact();
+        if (r < 0) {
+            local_irq_restore(flags);
+            return -ENOSPC;
         }
-        memset(sector, 0, SECTOR_SIZE);
-        memcpy(sector, (const u8 *)data + done, chunk);
-        jfs_write_sector(JFS_LBA + jfs_head + 1 + done / SECTOR_SIZE, sector);
-        done += chunk;
     }
-
-    memset(sector, 0, SECTOR_SIZE);
-    r->type = type;
-    r->seq = jfs_seq;
-    r->offset = offset;
-    r->data_len = len;
-    memcpy((u8 *)r->path, (const u8 *)path, strlen(path) + 1);
-    if (path2) {
-        memcpy((u8 *)r->path2, (const u8 *)path2, strlen(path2) + 1);
+    r = jfs_emit(region_base(jfs_active), &jfs_head, &jfs_seq,
+                 type, path, path2, offset, data, len);
+    if (r == 0) {
+        write_super();
     }
-    c = rec_crc(r, data ? data : (u8 *)"");
-    r->crc = c;
-    r->magic = JFS_REC_MAGIC;
-    jfs_write_sector(JFS_LBA + jfs_head, sector);
-    hd_flush();
-
-    jfs_head += sectors;
-    jfs_seq++;
-    return 0;
+    local_irq_restore(flags);
+    return r;
 }
 
 int jfs_log_write(const char *path, u32 offset, const u8 *data, u32 len)
