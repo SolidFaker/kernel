@@ -56,7 +56,8 @@ int main(int argc, char **argv)
         fclose(stream);
     }
 
-    FILE *wstream = fopen("./kernel.img", "wb");
+    const char *out = getenv("MKFS_OUT");
+    FILE *wstream = fopen(out ? out : "./kernel.img", "wb");
 
     // write header
     fwrite(&header, sizeof(struct myfs_struct), 1, wstream);

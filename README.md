@@ -4,10 +4,19 @@
 
 ```
 make all     # 交叉工具链默认 i686-elf-*，可用 CC=/AS=/LD= 覆盖
-make test    # 用 QEMU 启动 80m.img（带 e1000 用户态网络）
+             # 所有产物写入 build/（build/bin、build/80m.img、build/kernel.map）
+make test    # qemu-system-i386 启动 build/80m.img（带 e1000 用户态网络）
+make test64  # qemu-system-x86_64 启动同一镜像（64 位 CPU 的 32 位兼容模式）
 ```
 
 macOS 安装工具链：`brew install i686-elf-gcc qemu`
+
+## 64-bit CPU
+
+当前内核是 32 位保护模式；`make test64` 验证它能在 x86_64 CPU 的 32 位兼容模式下
+完整启动（toybox shell、网络、图形都正常）。真正的 64 位 long-mode 内核尚未实现，
+那需要重写 boot/long-mode 进入、4 级页表、64 位 ISR/TSS/syscall、ELF64 加载器、
+64 位 libc/musl 和全部 inline asm。
 
 ## musl + toybox
 
@@ -108,12 +117,12 @@ Git Bash 下构建（工具链约定放在 `I:/tools`：i686-elf 交叉编译器
 
 ```
 bash build-win.sh
-qemu-system-i386 -m 64 -drive file=80m.img,format=raw,if=ide -nic user,model=e1000 -no-reboot
+qemu-system-i386 -m 64 -drive file=build/80m.img,format=raw,if=ide -nic user,model=e1000 -no-reboot
 ```
 
 - 交叉工具链：`I:/tools/i686-elf/bin/i686-elf-gcc.exe`（可用 `CROSS=`/`HOSTCC=` 覆盖）
 - 无头调试：`build-win.sh` 的 CFLAGS 加 `-DDEBUG_E9` 重编译，printk 输出会镜像到 E9 调试端口：
-  `qemu-system-i386 -display none -chardev stdio,id=e9 -device isa-debugcon,iobase=0xe9,chardev=e9 -drive file=80m.img,format=raw,if=ide`
+  `qemu-system-i386 -display none -chardev stdio,id=e9 -device isa-debugcon,iobase=0xe9,chardev=e9 -drive file=build/80m.img,format=raw,if=ide`
 
 ## snapshot
 
