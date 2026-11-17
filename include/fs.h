@@ -2,6 +2,7 @@
 #define FS_H
 
 #include "common.h"
+#include "posix_abi.h"
 
 #define FS_FILE        0x01
 #define FS_DIRECTORY   0x02
@@ -17,33 +18,52 @@
 #define FD_FREE    0
 #define FD_TTY_IN  1   // fd 0: the keyboard
 #define FD_TTY_OUT 2   // fd 1/2: the task's tty
-#define FD_FILE    3   // a regular file on the (read-only) filesystem
+#define FD_FILE    3   // a regular file on the filesystem
 #define FD_DIR     4   // a directory, iterable with getdents()
+#define FD_PIPE    5   // one end of a pipe
+#define FD_SOCKET  6   // one end of a local socket
+
+struct pipe;
+struct socket;
+
+/* A POSIX open file description: shared by dup()/dup2()/fork(), so
+   offsets and pipe state are shared exactly like on POSIX. */
+struct ofd {
+    int refs;
+    u8 used;
+    u32 offset;
+    struct pipe *pipe;
+    struct socket *sock;
+    u8 pipe_write;
+    u8 append;
+    u8 nonblock;
+};
 
 struct file {
     u8 used;
     u8 kind;
+    u8 flags;              // FD_CLOEXEC
     struct fs_node *node;
-    u32 offset;    // file position / getdents index
+    struct ofd *ofd;
 };
 
-// Minimal POSIX-style stat (see fstat)
-#define S_IFREG 0x8000
-#define S_IFDIR 0x4000
-
-struct stat {
-    u32 st_mode;
-    u32 st_size;
-};
+struct ofd *ofd_alloc(void);
+struct ofd *ofd_get(struct ofd *o);
+void ofd_put(struct ofd *o);
 
 struct fs_node;
 
 typedef              u32 (*fn_read_fs)    (struct fs_node*,u32,u32,u8*);
-typedef              u32 (*fn_write_fs)   (struct fs_node*,u32,u32,u8*);
+typedef               int (*fn_write_fs)   (struct fs_node*,u32,u32,u8*);
 typedef             void (*fn_open_fs)    (struct fs_node*);
 typedef             void (*fn_close_fs)   (struct fs_node*);
 typedef  struct dirent * (*fn_readdir_fs) (struct fs_node*,u32);
 typedef struct fs_node * (*fn_finddir_fs) (struct fs_node*,char *name);
+typedef struct fs_node * (*fn_create_fs)  (struct fs_node*,char *name,u32 is_dir);
+typedef               int (*fn_unlink_fs)  (struct fs_node*,char *name);
+typedef               int (*fn_rename_fs)  (struct fs_node*,char *name,
+                                             struct fs_node*,char *newname);
+typedef               int (*fn_truncate_fs)(struct fs_node*,u32 length);
 
 struct fs_node {
     char name[128]; // The filename
@@ -60,6 +80,10 @@ struct fs_node {
     fn_close_fs close;
     fn_readdir_fs readdir;
     fn_finddir_fs finddir;
+    fn_create_fs create;
+    fn_unlink_fs unlink;
+    fn_rename_fs rename;
+    fn_truncate_fs truncate;
     struct fs_node *ptr; // used by mountpoints and symlinks
 };
 
@@ -76,7 +100,14 @@ extern struct fs_node *fs_root; // The root of the filesystem.
 // _fs to distinguish them from the read/write/open/close which deal with file descriptors
 // not file nodes.
 u32 read_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer);
-u32 write_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer);
+int write_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer);
+struct fs_node *create_fs(struct fs_node *dir, const char *name, int is_dir);
+int unlink_fs(struct fs_node *dir, const char *name);
+int rename_fs(struct fs_node *olddir, const char *name,
+              struct fs_node *newdir, const char *newname);
+int truncate_fs(struct fs_node *node, u32 length);
+
+struct fs_node *init_ramfs(void);
 void open_fs(struct fs_node *node, u8 read, u8 write);
 void close_fs(struct fs_node *node);
 struct dirent *readdir_fs(struct fs_node *node, u32 index);

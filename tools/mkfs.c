@@ -51,7 +51,7 @@ int main(int argc, char **argv)
         entries[i].data_count = ftell(stream) / SECTOR_SIZE + 1;
         entries[i].entry_type = MYFS_FILE;
         sector_count += entries[i].data_count;
-        printf("writing file %s->%s at sector: %ld count: %ld\n",
+        printf("writing file %s->%s at sector: %u count: %u\n",
                 argv[i*2+1], argv[i*2+2], entries[i].data_sector, entries[i].data_count);
         fclose(stream);
     }

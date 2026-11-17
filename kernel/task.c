@@ -4,6 +4,7 @@
 #include "string.h"
 #include "common.h"
 #include "debug.h"
+#include "signal.h"
 #include "drivers/timer.h"
 #include "syscall.h"
 
@@ -39,13 +40,23 @@ u32 task_idle(__UNUSED__ void *arg)
 // exec replaces this task with shell.elf, and this code never runs again.
 u32 task_init(__UNUSED__ void *arg)
 {
+    static const char *toy_argv[] = {
+        "toybox", "sh", "-i", 0
+    };
+    static const char *toy_envp[] = {
+        "PATH=/", "HOME=/", "TERM=linux", 0
+    };
+
     asm volatile ("movl %0, %%ebp"::"r"((u32)current->user_stack));
     asm volatile ("movl %0, %%esp"::"r"((u32)current->user_stack + USER_STACK_SIZE));
 
     switch_to_user_mode();
-    execve("shell.elf", 0, 0);
-    print_str("shell exec failed\n");
-    exit(1);
+    if (execve("toybox.elf", (char *const *)toy_argv,
+               (char *const *)toy_envp) < 0) {
+        execve("shell.elf", 0, 0);
+        print_str("shell exec failed\n");
+        exit(1);
+    }
     return 0;  // not reached
 }
 
@@ -62,11 +73,18 @@ void init_task()
     current->priority = 1;
     strcpy(current->name, "main");
     current->pid = pid_now++; // kernel pid is 0
+    current->tgid = current->pid;
+    current->is_thread = 0;
+    current->linux_abi = 0;
+    signal_init_task(current);
     current->mm = NULL;       // do not need this for kernel
+    current->mmap_base = MMAP_BASE;
     current->user_stack = NULL;
     current->parent = NULL;
     current->flags = 0;
     current->tty = tty_cur;
+    current->cwd[0] = '/';
+    current->cwd[1] = '\0';
     memset((u8 *)current->fds, 0, sizeof(current->fds));
     fds_init_std(current);
 
@@ -145,6 +163,7 @@ struct task_struct *alloc_task()
     new_task->time_slice = current->priority * 50;
     new_task->exit_code = 0;
     new_task->brk = 0;
+    new_task->mmap_base = current->mmap_base;
     // the child keeps the parent's name until it execs something else
     {
         u32 k;
@@ -157,10 +176,30 @@ struct task_struct *alloc_task()
     new_task->user_stack = pstack;
     new_task->parent = current;
     new_task->pid = pid_now++;
+    new_task->tgid = new_task->pid;
+    new_task->is_thread = 0;
+    new_task->linux_abi = current->linux_abi;
     new_task->mm = NULL;
     new_task->tty = current->tty;
     // POSIX-style: the child inherits the parent's open descriptors
     memcpy((u8 *)new_task->fds, (u8 *)current->fds, sizeof(new_task->fds));
+    signal_fork(current, new_task);
+
+    {
+        u32 ci;
+        for (ci = 0; ci < sizeof(new_task->cwd) - 1 && current->cwd[ci]; ci++) {
+            new_task->cwd[ci] = current->cwd[ci];
+        }
+        new_task->cwd[ci] = '\0';
+    }
+    {
+        int fi;
+        for (fi = 0; fi < FD_MAX; fi++) {
+            if (new_task->fds[fi].used && new_task->fds[fi].ofd) {
+                ofd_get(new_task->fds[fi].ofd);
+            }
+        }
+    }
 
     new_task->context->esp = (u32)((u32)kstack + KERNEL_STACK_SIZE);
     new_task->context->ebp = (u32)kstack;

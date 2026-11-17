@@ -99,6 +99,7 @@ struct mm_struct *mm_create(void)
 
     mm->pdt = (page_entry_t *)(pdt_pa + PAGE_OFFSET);
     mm->pdt_phys = pdt_pa;
+    mm->refs = 1;
     bzero((u8 *)mm->pdt, PAGE_SIZE);
 
     u32 i;
@@ -141,6 +142,20 @@ struct mm_struct *mm_copy(struct mm_struct *src)
         }
     }
     return mm;
+}
+
+void mm_get(struct mm_struct *mm)
+{
+    if (mm) {
+        mm->refs++;
+    }
+}
+
+void mm_put(struct mm_struct *mm)
+{
+    if (mm && --mm->refs == 0) {
+        mm_destroy(mm);
+    }
 }
 
 // Must not run while CR3 still points at mm->pdt_phys.

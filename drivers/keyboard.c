@@ -148,6 +148,11 @@ static void kbd_putc(char c)
     kbd_head = next;
 }
 
+int kbd_haschar(void)
+{
+    return kbd_tail != kbd_head;
+}
+
 int kbd_getchar(void)
 {
     if (kbd_tail == kbd_head) {

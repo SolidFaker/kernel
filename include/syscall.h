@@ -4,7 +4,7 @@
 #include "common.h"
 #include "init.h"
 
-#define SYSCALL_NUM 64
+#define SYSCALL_NUM 96
 
 void init_syscall();
 

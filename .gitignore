@@ -12,3 +12,4 @@ freedos*
 mkfs_kernel
 mkfs_kernel.exe
 bin/
+libc.a

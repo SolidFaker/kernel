@@ -9,6 +9,8 @@
 #include "vfs.h"
 #include "fs/myfs.h"
 #include "drivers/display.h"
+#include "drivers/fbcon.h"
+#include "net.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "drivers/tty.h"
@@ -30,6 +32,12 @@ void kernel_start(void)
     init_page();
     init_page_stack();
 
+    // e1000 NIC + ARP/IPv4/ICMP
+    net_init();
+
+    // graphical terminal (VBE linear framebuffer)
+    fbcon_init();
+
     // multi task init
     init_task();
 
@@ -43,7 +51,11 @@ void kernel_start(void)
     init_keyboard();
     init_timer(TIMER_HZ);     // schedule() here
 
-    flush_screen(tty_cur);
+    // boot log and shell share tty 1, so the terminal shows the whole
+    // startup sequence
+    flush_screen(&tty[1]);
+    tty_print = &tty[1];
+    switch_tty(&tty[1]);
 
     // print system info
     print_info();
@@ -51,9 +63,6 @@ void kernel_start(void)
     kthread_start("idle", task_idle, &tty[0], 1, NULL);
     kthread_start("ttyd", task_tty, &tty[0], 1, NULL);
     kthread_start("init", task_init, &tty[1], 5, NULL);
-
-    // show the shell tty on boot
-    switch_tty(&tty[1]);
 
     // enable interrupt
     sti();

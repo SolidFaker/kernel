@@ -1,4 +1,5 @@
 #include "fs.h"
+#include "errno.h"
 
 struct fs_node *fs_root = 0; // The root of the filesystem.
 
@@ -12,14 +13,12 @@ u32 read_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
     }
 }
 
-u32 write_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
+int write_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
 {
-    // Has the node got a write callback?
     if (node->write != 0) {
         return node->write(node, offset, size, buffer);
-    } else {
-        return 0;
     }
+    return -EROFS;
 }
 
 void open_fs(struct fs_node *node, __UNUSED__ u8 read, __UNUSED__ u8 write)
@@ -56,4 +55,38 @@ struct fs_node *finddir_fs(struct fs_node *node, char *name)
     } else {
         return 0;
     }
+}
+
+struct fs_node *create_fs(struct fs_node *dir, const char *name, int is_dir)
+{
+    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->create) {
+        return 0;
+    }
+    return dir->create(dir, (char *)name, (u32)is_dir);
+}
+
+int unlink_fs(struct fs_node *dir, const char *name)
+{
+    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->unlink) {
+        return -EROFS;
+    }
+    return dir->unlink(dir, (char *)name);
+}
+
+int rename_fs(struct fs_node *olddir, const char *name,
+              struct fs_node *newdir, const char *newname)
+{
+    if (!olddir || (olddir->flags & 0x7) != FS_DIRECTORY || !olddir->rename ||
+            !newdir || (newdir->flags & 0x7) != FS_DIRECTORY) {
+        return -EXDEV;
+    }
+    return olddir->rename(olddir, (char *)name, newdir, (char *)newname);
+}
+
+int truncate_fs(struct fs_node *node, u32 length)
+{
+    if (!node || !node->truncate) {
+        return -EINVAL;
+    }
+    return node->truncate(node, length);
 }

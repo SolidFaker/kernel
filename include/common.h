@@ -12,8 +12,9 @@
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
-typedef unsigned long  u32;
+typedef unsigned int   u32;
 
+#ifdef __i386__
 static inline void cli(void)
 {
     asm volatile("cli");
@@ -95,5 +96,6 @@ static inline u32 inl(u16 port)
     asm volatile("inl %1,%0" : "=a" (v) : "dN" (port));
     return v;
 }
+#endif /* __i386__ */
 
 #endif

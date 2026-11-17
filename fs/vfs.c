@@ -1,54 +1,33 @@
+// Filesystem bootstrap: import the read-only myfs image into the writable
+// in-memory ramfs, then expose that as the VFS root.
+
 #include "vfs.h"
 #include "debug.h"
-#include "tools.h"
-#include "mm.h"
-#include "string.h"
 #include "fs.h"
 #include "fs/myfs.h"
 #include "drivers/hd.h"
+#include "mm.h"
+#include "string.h"
+#include "tools.h"
+#include "drivers/display.h"
 
-#define DIRINIT(dir) \
-    node_##dir->mask = 0;\
-    node_##dir->uid = 0;\
-    node_##dir->gid = 0;\
-    node_##dir->inode = 0;\
-    node_##dir->length = 0;\
-    node_##dir->flags = FS_DIRECTORY;\
-    node_##dir->read = 0;\
-    node_##dir->write = 0;\
-    node_##dir->open = 0;\
-    node_##dir->close = 0;\
-    node_##dir->readdir = &readdir;\
-    node_##dir->finddir = &finddir;\
-    node_##dir->ptr = 0;\
-    node_##dir->impl = 0
+#define SECTOR_SIZE 512
 
-struct myfs_struct *header;
-struct myfs_entry  *entries;
-
-struct fs_node *node_root;
-struct fs_node *node_dev;
-struct fs_node *nodes;   // List of file nodes.
-u32 node_num;            // Number of file nodes.
-
-struct dirent dirent;
 static u8 sector_buffer[SECTOR_SIZE];
 
-static u32 read(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
+static u32 myfs_read_entry(struct myfs_entry *e, u32 offset, u32 size,
+                           u8 *buffer)
 {
-    struct myfs_entry entry = entries[node->inode];
+    u32 done = 0;
 
-    if (offset >= entry.data_size) {
+    if (offset >= e->data_size) {
         return 0;
     }
-    if (size > entry.data_size - offset) {
-        size = entry.data_size - offset;
+    if (size > e->data_size - offset) {
+        size = e->data_size - offset;
     }
-
-    // files span whole sectors; copy the requested range chunk by chunk
-    u32 done = 0;
     while (done < size) {
-        u32 sec = entry.data_sector + (offset + done) / SECTOR_SIZE;
+        u32 sec = e->data_sector + (offset + done) / SECTOR_SIZE;
         u32 in_off = (offset + done) % SECTOR_SIZE;
         u32 chunk = SECTOR_SIZE - in_off;
         if (chunk > size - done) {
@@ -61,89 +40,65 @@ static u32 read(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
     return size;
 }
 
-static struct dirent *readdir(struct fs_node *node, u32 index)
-{
-    if (node == node_root && index == 0)
-    {
-        strcpy(dirent.name, "dev");
-        dirent.name[3] = 0;
-        dirent.ino = 0;
-        return &dirent;
-    }
-
-    if (index-1 >= node_num)
-        return 0;
-    strcpy(dirent.name, nodes[index-1].name);
-    dirent.name[strlen(nodes[index-1].name)] = 0;
-    dirent.ino = nodes[index-1].inode;
-    return &dirent;
-}
-
-static struct fs_node *finddir(struct fs_node *node, char *name)
-{
-    if (node == node_root && !strcmp(name, "dev"))
-        return node_dev;
-
-    u32 i;
-    for (i = 0; i < node_num; i++)
-        if (!strcmp(name, nodes[i].name))
-            return &nodes[i];
-    return 0;
-}
-
-
 struct fs_node *init_vfs()
 {
-    void *first_sector = kmalloc(SECTOR_SIZE);
-    readseg((u8 *)first_sector, SECTOR_SIZE, 10 * SECTOR_SIZE);
+    u8 first[SECTOR_SIZE];
+    struct myfs_struct *hdr;
+    struct myfs_entry *ent;
+    u32 total, i;
+    u8 *image;
 
-    header = (struct myfs_struct *)(first_sector);
-
-    if (header->magic != MYFS_MAGIC){
+    readseg(first, SECTOR_SIZE, 10 * SECTOR_SIZE);
+    hdr = (struct myfs_struct *)first;
+    if (hdr->magic != MYFS_MAGIC) {
         ERROR("RAMDISK INIT FAILED!");
+        return 0;
     }
 
-    entries = (struct myfs_entry *)((u32)first_sector + sizeof(struct myfs_struct));
+    total = sizeof(struct myfs_struct) +
+            hdr->entry_num * sizeof(struct myfs_entry);
+    image = (u8 *)kmalloc(total);
+    if (!image) {
+        ERROR("RAMDISK OUT OF MEMORY!");
+        return 0;
+    }
+    readseg(image, total, 10 * SECTOR_SIZE);
+    hdr = (struct myfs_struct *)image;
+    ent = (struct myfs_entry *)(image + sizeof(struct myfs_struct));
 
-    // Initialise the root directory.
-    node_root = (struct fs_node *)kmalloc(sizeof(struct fs_node));
-    strcpy(node_root->name, "root");
-    DIRINIT(root);
+    fs_root = init_ramfs();
+    if (!fs_root) {
+        ERROR("RAMFS INIT FAILED!");
+        return 0;
+    }
+    create_fs(fs_root, "dev", 1);
 
-    // Initialise the /dev directory (required!)
-    node_dev = (struct fs_node *)kmalloc(sizeof(struct fs_node));
-    strcpy(node_dev->name, "dev");
-    DIRINIT(dev);
+    for (i = 1; i < hdr->entry_num; i++) {
+        char name[sizeof(ent[i].entry_name) + 1];
+        struct fs_node *node;
+        u8 *data;
+        u32 n;
 
-    nodes = (struct fs_node *)kmalloc(sizeof(struct fs_node) * header->entry_num);
-    node_num = header->entry_num;
-    // For every file...
-    u32 i;
-    for (i = 0; i < node_num; i++)
-    {
-        // Create a new file node.
-        strcpy(nodes[i].name, entries[i].entry_name);
-        nodes[i].mask = 0;
-        nodes[i].uid = 0;
-        nodes[i].gid = 0;
-        nodes[i].length = entries[i].data_size;
-        nodes[i].inode = i;
-        switch (entries[i].entry_type)
-        {
-            case MYFS_FILE:
-                nodes[i].flags = FS_FILE;
-                break;
-            case MYFS_DIR:
-                nodes[i].flags = FS_DIRECTORY;
-                break;
+        if (ent[i].entry_type != MYFS_FILE) {
+            continue;
         }
-        nodes[i].read = &read;
-        nodes[i].write = 0;
-        nodes[i].readdir = 0;
-        nodes[i].finddir = 0;
-        nodes[i].open = 0;
-        nodes[i].close = 0;
-        nodes[i].impl = 0;
+        memcpy((u8 *)name, (const u8 *)ent[i].entry_name,
+               sizeof(ent[i].entry_name));
+        name[sizeof(ent[i].entry_name)] = 0;
+
+        node = create_fs(fs_root, name, 0);
+        if (!node || ent[i].data_size == 0) {
+            continue;
+        }
+        data = (u8 *)kmalloc(ent[i].data_size);
+        if (!data) {
+            continue;
+        }
+        n = myfs_read_entry(&ent[i], 0, ent[i].data_size, data);
+        write_fs(node, 0, n, data);
+        kfree(data);
     }
-    return node_root;
+
+    kfree(image);
+    return fs_root;
 }

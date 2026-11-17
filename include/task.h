@@ -23,16 +23,22 @@ struct task_context {
 struct mm_struct {
     page_entry_t *pdt;     // kernel-space alias of the page directory
     u32 pdt_phys;          // physical address, for loading into CR3
+    int refs;              // shared by threads
 };
 
 struct task_struct {
     u32 pid;
+    u32 tgid;
+    u8 is_thread;
+    u8 linux_abi;
     u32 time_slice;
     u32 flags;
     u8 priority;
     char name[16];               // task name: kthread label / program name
+    char cwd[128];               // absolute working directory
     u32 exit_code;               // set by exit(), read by waitpid()
     u32 brk;                     // user heap break (mm tasks only)
+    u32 mmap_base;               // next anonymous mmap address
     void *kernel_stack;
     void *user_stack;
     enum task_state state;
@@ -42,6 +48,16 @@ struct task_struct {
     struct task_context *context;      // switch() here to run taskess
     struct trap_frame *frame;
     struct task_struct *parent;
+
+    /* POSIX signal state */
+    u32 pending_sig;
+    u32 blocked_sig;
+    u32 sig_handler[32];
+    u32 sig_mask[32];
+    u32 sig_restorer[32];
+    u32 alarm_tick;
+    u32 pgid;
+    u32 sid;
 };
 
 struct task_list {

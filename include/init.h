@@ -5,7 +5,8 @@
 
 #define DPL0 0
 #define DPL3 3
-#define GDT_ENTRY_NUM  6
+#define GDT_ENTRY_NUM  64
+#define GDT_TLS_FIRST  6
 #define IDT_ENTRY_NUM  256
 
 #define GDT_ENTRY_KERNEL_CS 1

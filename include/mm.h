@@ -6,15 +6,16 @@
 
 // stack size of thread
 #define USER_STACK_SIZE      2048
-#define KERNEL_STACK_SIZE    2048
+#define KERNEL_STACK_SIZE    8192
 #define HEAP_START      0xE0000000
+#define MMAP_BASE       0x40000000
 // max memory
 #define MEMORY_SIZE     0x04000000
 #define PAGE_STACK_SIZE (MEMORY_SIZE/PAGE_SIZE)
 
 // where exec() maps the user stack of a loaded program
 #define USER_STACK_VA_TOP  0x00200000
-#define USER_STACK_PAGES   2
+#define USER_STACK_PAGES   16
 
 struct mmap_entry {
     u32 base_low;
@@ -52,6 +53,8 @@ u32  kernel_pdt_phys(void);
 struct mm_struct *mm_create(void);
 struct mm_struct *mm_copy(struct mm_struct *src);
 void mm_destroy(struct mm_struct *mm);
+void mm_get(struct mm_struct *mm);
+void mm_put(struct mm_struct *mm);
 
 void *kmalloc(u32 len);
 void kfree(void *p);

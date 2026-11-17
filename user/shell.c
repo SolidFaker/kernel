@@ -176,15 +176,47 @@ static void read_line(void)
     }
 }
 
+// Fork + exec a program in the foreground and show its exit status.
+static void run_program(const char *path)
+{
+    int pid = fork();
+    if (pid == 0) {
+        char *const argv2[2] = { (char *)path, 0 };
+        if (execve(path, argv2, 0) < 0) {
+            print("\x1b[31mexec failed: ");
+            print(path);
+            print("\x1b[0m\n");
+        }
+        exit(127);
+    }
+
+    int st = 0;
+    int w = waitpid(pid, &st);
+    if (w == pid) {
+        print("\x1b[32mstatus ");
+        print_dec(st);
+        print("\x1b[0m\n");
+    } else {
+        print("\x1b[31mwaitpid failed\x1b[0m\n");
+    }
+}
+
 static void run_cmd(const char *cmd, const char *arg)
 {
     if (streq(cmd, "help")) {
-        print("commands:\n"
+        print("\x1b[36mcommands:\x1b[0m\n"
               "  help          this text\n"
               "  ps            list tasks\n"
               "  ls            list files\n"
               "  cat <file>    print a file\n"
               "  run <file>    fork + exec a user ELF\n"
+              "  gfx           VGA 320x200x256 graphics demo\n"
+              "  posix         run POSIX self tests\n"
+              "  libc          run the standard C/libc demo\n"
+              "  ping          ping 10.0.2.2 through the e1000 NIC\n"
+              "  net           UDP echo test to 10.0.2.2:9999\n"
+              "  musl          run the musl static hello world\n"
+              "  toybox        launch toybox sh\n"
               "  chtty <0-3>   move the shell to tty n\n"
               "  exit          quit the shell\n");
         return;
@@ -223,9 +255,9 @@ static void run_cmd(const char *cmd, const char *arg)
         }
         int fd = open(arg, O_RDONLY);
         if (fd < 0) {
-            print("no such file: ");
+            print("\x1b[31mno such file: ");
             print(arg);
-            echo_char('\n');
+            print("\x1b[0m\n");
             return;
         }
         int n;
@@ -250,48 +282,69 @@ static void run_cmd(const char *cmd, const char *arg)
         }
         return;
     }
+    if (streq(cmd, "gfx")) {
+        run_program("gfx.elf");
+        return;
+    }
+    if (streq(cmd, "posix")) {
+        run_program("postest.elf");
+        return;
+    }
+    if (streq(cmd, "libc")) {
+        run_program("libctest.elf");
+        return;
+    }
+    if (streq(cmd, "toybox")) {
+        run_program("toyrun.elf");
+        return;
+    }
+    if (streq(cmd, "musl")) {
+        run_program("hello_musl.elf");
+        return;
+    }
+    if (streq(cmd, "net")) {
+        run_program("nettest.elf");
+        return;
+    }
+    if (streq(cmd, "ping")) {
+        int a;
+        int r;
+        __asm__ volatile("int $0x80" : "=a" (a)
+                         : "0" (79), "b" (0x0A000202), "c" (1000)
+                         : "memory");
+        if (a >= 0) {
+            print("ping 10.0.2.2: ");
+            print_dec(a);
+            print(" ms\n");
+        } else {
+            print("\x1b[31mping failed\x1b[0m\n");
+        }
+        (void)r;
+        return;
+    }
     if (streq(cmd, "run")) {
         if (!*arg) {
             print("usage: run <file>\n");
             return;
         }
-        int pid = fork();
-        if (pid == 0) {
-            char *const argv2[2] = { (char *)arg, 0 };
-            if (execve(arg, argv2, 0) < 0) {
-                print("exec failed: ");
-                print(arg);
-                echo_char('\n');
-            }
-            exit(127);
-        }
-        // foreground execution: wait for the child and show its status
-        int st = 0;
-        int w = waitpid(pid, &st);
-        if (w == pid) {
-            print("status ");
-            print_dec(st);
-            echo_char('\n');
-        } else {
-            print("waitpid failed\n");
-        }
+        run_program(arg);
         return;
     }
     if (streq(cmd, "exit")) {
         print("bye\n");
         exit(0);
     }
-    print("unknown command: ");
+    print("\x1b[31munknown command: ");
     print(cmd);
-    print(" (try help)\n");
+    print(" (try help)\x1b[0m\n");
 }
 
 void _start(void)
 {
-    print("a-mini-kernel shell -- type help\n");
+    print("\x1b[1;36ma-mini-kernel shell\x1b[0m -- type help\n");
 
 #ifdef AUTO_DEMO
-    /* headless self-test (bochs E9 console): exercise every command */
+    /* headless self-test (E9 console): exercise every command */
     run_cmd("help", "");
     run_cmd("ps", "");
     run_cmd("ls", "");
@@ -301,7 +354,7 @@ void _start(void)
 #endif
 
     for (;;) {
-        print("> ");
+        print("\x1b[1;36m>\x1b[0m ");
         read_line();
 
         /* split "cmd arg" */

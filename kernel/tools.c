@@ -20,7 +20,7 @@ void printk(const char *format, ...)
     buff[i] = '\0';
 
 #ifdef DEBUG_E9
-    {   /* mirror output to the bochs debug port (see bochsrc port_e9_hack) */
+    {   /* mirror output to the E9 debug port (QEMU isa-debugcon) */
         const char *c;
         for (c = buff; *c; c++) {
             outb(0xE9, (u8)*c);

@@ -14,6 +14,7 @@
 #define  PAGE_SIZE    0x1000
 #define  PAGE_MASK    0xFFFFF000
 #define  PAGE_OFFSET  0xC0000000
+#define  FB_VIRT_BASE 0xD0000000   /* VBE linear framebuffer window */
 
 #define  KPDT_COUNT       16
 #define  PAGE_TABLE_SIZE  1024

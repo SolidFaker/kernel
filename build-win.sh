@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build the kernel on Windows using Git Bash + the i686-elf cross toolchain,
 # then write the bootable 80m.img. Boot it afterwards with:
-#   I:/tools/bochs/bochs.exe -q -f bochsrc.windows
+#   qemu-system-i386 -m 64 -drive file=80m.img,format=raw,if=ide -no-reboot
 #
 # Toolchain layout expected (override with CROSS= / HOSTCC=):
 #   I:/tools/i686-elf/bin/i686-elf-gcc.exe ...   (cross compiler)
@@ -53,11 +53,29 @@ UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall -
 "$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/hello.o -o user/hello.elf
 "$CC" $UFLAGS ${AUTO_DEMO:+-DAUTO_DEMO} user/shell.c -o user/shell.o
 "$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/shell.o -o user/shell.elf
+"$CC" $UFLAGS user/gfx.c -o user/gfx.o
+"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/gfx.o -o user/gfx.elf
+"$CC" $UFLAGS user/postest.c -o user/postest.o
+"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic user/postest.o -o user/postest.elf
+
+# ---- libc + a standard C demo ----
+for f in user/libc/*.c; do
+    "$CC" $UFLAGS -Iuser/libc/include "$f" -o "${f%.c}.o"
+done
+"${CROSS}ar" rcs libc.a user/libc/*.o
+"$CC" $UFLAGS -Iuser/libc/include user/libctest.c -o user/libctest.o
+"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic \
+    user/libc/crt0.o user/libctest.o libc.a -o user/libctest.elf
+"$CC" $UFLAGS -Iuser/libc/include user/nettest.c -o user/nettest.o
+"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic \
+    user/libc/crt0.o user/nettest.o libc.a -o user/nettest.elf
 
 # ---- host tool: filesystem image ----
 "$HOSTCC" -Os -I./include tools/mkfs.c -o mkfs_kernel.exe
 ./mkfs_kernel.exe "$OUT/loader.bin" loader.bin "$OUT/kernel.elf" kernel.elf \
-    user/hello.elf hello.elf user/shell.elf shell.elf ./README.md README
+    user/hello.elf hello.elf user/shell.elf shell.elf user/gfx.elf gfx.elf \
+    user/postest.elf postest.elf user/libctest.elf libctest.elf \
+    user/nettest.elf nettest.elf ./README.md README
 
 # ---- disk image ----
 [ -f 80m.img ] || dd if=/dev/zero of=80m.img bs=1M count=80

@@ -1,13 +1,22 @@
 #include "drivers/timer.h"
+#include "drivers/fbcon.h"
 #include "common.h"
 #include "tools.h"
 #include "task.h"
 #include "init.h"
+#include "signal.h"
 
 volatile u32 tick = 0;
 void timer_callback()
 {
+    static u32 blink_ticks = 0;
+
     tick++;
+    signal_check_alarm();
+    if (++blink_ticks >= TIMER_HZ / 2) {
+        blink_ticks = 0;
+        fbcon_blink();
+    }
     schedule();
 }
 

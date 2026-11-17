@@ -3,6 +3,7 @@
 #include "mm.h"
 #include "string.h"
 #include "debug.h"
+#include "bootinfo.h"
 #include "drivers/display.h"
 #include "tools.h"
 
@@ -11,6 +12,39 @@ page_entry_t __attribute__((aligned(PAGE_SIZE)))
 
 static page_entry_t __attribute__((aligned(PAGE_SIZE)))
     pet_kernel[KPDT_COUNT][PAGE_TABLE_SIZE];
+
+static page_entry_t __attribute__((aligned(PAGE_SIZE)))
+    pet_fb[2][PAGE_TABLE_SIZE];
+
+// Map the VBE linear framebuffer at FB_VIRT_BASE. Two page tables cover
+// the 1280x1024x32 mode selected by the loader (5 MiB).
+static void map_framebuffer(void)
+{
+    struct bootinfo *bi =
+        (struct bootinfo *)(BOOTINFO_ADDR + PAGE_OFFSET);
+    u32 size, pages, i, t;
+
+    if (bi->magic != BOOTINFO_MAGIC || bi->bpp != 32 || bi->fb_addr == 0) {
+        return;
+    }
+
+    size = (u32)bi->pitch * bi->height;
+    pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
+    if (pages > 2 * PAGE_TABLE_SIZE) {
+        pages = 2 * PAGE_TABLE_SIZE;
+    }
+    for (i = 0; i < pages; i++) {
+        t = i / PAGE_TABLE_SIZE;
+        pet_fb[t][i % PAGE_TABLE_SIZE].base = (bi->fb_addr >> 12) + i;
+        pet_fb[t][i % PAGE_TABLE_SIZE].flags = PG_WRITE | PG_PRESENT;
+    }
+
+    for (t = 0; t < 2; t++) {
+        i = PDT_INDEX(FB_VIRT_BASE) + t;
+        pdt_kernel[i].base = ((u32)pet_fb[t] - PAGE_OFFSET) >> 12;
+        pdt_kernel[i].flags = PG_WRITE | PG_PRESENT;
+    }
+}
 
     // Initilizing kernel page directory table
     // Mapping kernel space start at 0xC0000000
@@ -31,6 +65,8 @@ void init_page()
         pet[i].base = i;
         pet[i].flags = PG_WRITE | PG_PRESENT | PG_USER;
     }
+
+    map_framebuffer();
 
     // Registered page fault handler
     register_interrupt_handler(14, (interrupt_handler_t)page_fault);
