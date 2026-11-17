@@ -37,6 +37,7 @@ struct ofd {
     u8 pipe_write;
     u8 append;
     u8 nonblock;
+    char path[160];
 };
 
 struct file {

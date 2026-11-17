@@ -28,6 +28,7 @@ struct ofd *ofd_alloc(void)
     o->pipe_write = 0;
     o->append = 0;
     o->nonblock = 0;
+    o->path[0] = 0;
     return o;
 }
 

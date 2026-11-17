@@ -17,6 +17,9 @@ struct tty {
     volatile u16 *buffer;       /* TTY_COLS * TTY_ROWS cells (char | attr<<8) */
     struct termios termios;
     u32 pgrp;
+    char inbuf[256];
+    u16 in_len;
+    u16 in_pos;
 };
 
 extern struct tty *tty_cur;

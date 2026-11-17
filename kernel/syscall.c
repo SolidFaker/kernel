@@ -7,6 +7,7 @@
 #include "elf.h"
 #include "errno.h"
 #include "fs.h"
+#include "jfs.h"
 #include "gfx.h"
 #include "pipe.h"
 #include "posix_abi.h"
@@ -26,6 +27,7 @@
 typedef int (*sysc_func) (struct trap_frame *r);
 
 static void syscall_handler(struct trap_frame *frame);
+static void copy_string(char *dst, const char *src, u32 max);
 
 
 static sysc_func syscalls[SYSCALL_NUM];
@@ -823,6 +825,12 @@ static int sys_write(struct trap_frame *frame)
         if (f->ofd->append) {
             off = f->node->length;
         }
+        if (f->ofd->path[0] && count) {
+            int lr = jfs_log_write(f->ofd->path, off, (const u8 *)ubuf, count);
+            if (lr < 0) {
+                return lr;
+            }
+        }
         n = write_fs(f->node, off, count, (u8 *)ubuf);
         if (n < 0) {
             return n;
@@ -843,6 +851,8 @@ static int sys_open(struct trap_frame *frame)
     struct fs_node *parent = 0, *node = 0;
     struct ofd *o;
     char base[128];
+    char abspath[160];
+    int created = 0;
     u32 acc;
     int fd, r;
 
@@ -870,6 +880,7 @@ static int sys_open(struct trap_frame *frame)
             if (!node) {
                 return -ENOSPC;
             }
+            created = 1;
         } else if ((flags & O_CREAT) && (flags & O_EXCL)) {
             return -EEXIST;
         }
@@ -890,6 +901,9 @@ static int sys_open(struct trap_frame *frame)
             return -EROFS;
         }
         if ((flags & O_TRUNC) && acc != O_RDONLY) {
+            if (!created && path_normalize(name, abspath, sizeof(abspath)) == 0) {
+                jfs_log(JFS_TRUNCATE, abspath, 0, 0, 0, 0);
+            }
             r = truncate_fs(node, 0);
             if (r < 0) {
                 return r;
@@ -911,6 +925,12 @@ static int sys_open(struct trap_frame *frame)
     }
     o->append = (flags & O_APPEND) ? 1 : 0;
     o->nonblock = (flags & O_NONBLOCK) ? 1 : 0;
+    if (path_normalize(name, abspath, sizeof(abspath)) == 0) {
+        copy_string(o->path, abspath, sizeof(o->path));
+    }
+    if (created && o->path[0]) {
+        jfs_log(JFS_CREATE_FILE, o->path, 0, 0, 0, 0);
+    }
 
     current->fds[fd].used = 1;
     current->fds[fd].flags = 0;
@@ -2460,6 +2480,12 @@ static int sys_mkdir(struct trap_frame *frame)
     if (!create_fs(parent, base, 1)) {
         return -ENOSPC;
     }
+    {
+        char abs[160];
+        if (path_normalize(path, abs, sizeof(abs)) == 0) {
+            jfs_log(JFS_CREATE_DIR, abs, 0, 0, 0, 0);
+        }
+    }
     return 0;
 }
 
@@ -2484,6 +2510,12 @@ static int sys_rmdir(struct trap_frame *frame)
     if ((node->flags & 0x7) != FS_DIRECTORY) {
         return -ENOTDIR;
     }
+    {
+        char abs[160];
+        if (path_normalize(path, abs, sizeof(abs)) == 0) {
+            jfs_log(JFS_RMDIR, abs, 0, 0, 0, 0);
+        }
+    }
     return unlink_fs(parent, base);
 }
 
@@ -2507,6 +2539,12 @@ static int sys_unlink(struct trap_frame *frame)
     }
     if ((node->flags & 0x7) == FS_DIRECTORY) {
         return -EISDIR;
+    }
+    {
+        char abs[160];
+        if (path_normalize(path, abs, sizeof(abs)) == 0) {
+            jfs_log(JFS_UNLINK, abs, 0, 0, 0, 0);
+        }
     }
     return unlink_fs(parent, base);
 }
@@ -2533,6 +2571,13 @@ static int sys_rename(struct trap_frame *frame)
     if (!finddir_fs(olddir, oldbase)) {
         return -ENOENT;
     }
+    {
+        char a[160], b[160];
+        if (path_normalize(oldpath, a, sizeof(a)) == 0 &&
+                path_normalize(newpath, b, sizeof(b)) == 0) {
+            jfs_log(JFS_RENAME, a, b, 0, 0, 0);
+        }
+    }
     return rename_fs(olddir, oldbase, newdir, newbase);
 }
 
@@ -2550,6 +2595,12 @@ static int sys_truncate(struct trap_frame *frame)
     if ((node->flags & 0x7) == FS_DIRECTORY) {
         return -EISDIR;
     }
+    {
+        char abs[160];
+        if (path_normalize(path, abs, sizeof(abs)) == 0) {
+            jfs_log(JFS_TRUNCATE, abs, 0, length, 0, 0);
+        }
+    }
     return truncate_fs(node, length);
 }
 
@@ -2563,6 +2614,9 @@ static int sys_ftruncate(struct trap_frame *frame)
     }
     if (current->fds[fd].kind != FD_FILE) {
         return -EINVAL;
+    }
+    if (current->fds[fd].ofd && current->fds[fd].ofd->path[0]) {
+        jfs_log(JFS_TRUNCATE, current->fds[fd].ofd->path, 0, length, 0, 0);
     }
     return truncate_fs(current->fds[fd].node, length);
 }
@@ -3252,6 +3306,12 @@ static int linux_openat(struct trap_frame *frame)
     }
 }
 
+static int tty_canon_read(struct tty *t, u8 *buf, u32 count);
+static int linux_mkdirat(struct trap_frame *frame);
+static int linux_unlinkat(struct trap_frame *frame);
+static int linux_renameat(struct trap_frame *frame);
+static int linux_fchdir(struct trap_frame *frame);
+
 static int linux_dispatch(struct trap_frame *frame)
 {
     u32 nr = frame->eax;
@@ -3260,13 +3320,14 @@ static int linux_dispatch(struct trap_frame *frame)
     case 1: case 252: return sys_exit(frame);
     case 2: return sys_fork(frame);
     case 3: {
-        int r = sys_read(frame);
         int fd = (int)frame->ebx;
-        if (r > 0 && fd >= 0 && fd < FD_MAX && current->fds[fd].used &&
-                current->fds[fd].kind == FD_TTY_IN) {
-            display_write(current->tty, (const char *)frame->ecx, (u32)r);
+        if (fd >= 0 && fd < FD_MAX && current->fds[fd].used &&
+                current->fds[fd].kind == FD_TTY_IN &&
+                (u32)frame->ecx >= 0x1000) {
+            return tty_canon_read(current->tty, (u8 *)frame->ecx,
+                                  frame->edx);
         }
-        return r;
+        return sys_read(frame);
     }
     case 4: return sys_write(frame);
     case 5: return sys_open(frame);
@@ -3306,6 +3367,7 @@ static int linux_dispatch(struct trap_frame *frame)
     case 122: return sys_uname(frame);
     case 125: return sys_mprotect(frame);
     case 132: return sys_getpgid(frame);
+    case 133: return linux_fchdir(frame);
     case 145: return linux_readv(frame);
     case 146: return linux_writev(frame);
     case 162: return sys_nanosleep(frame);
@@ -3334,6 +3396,9 @@ static int linux_dispatch(struct trap_frame *frame)
     case 199: case 200: case 201: case 202: return 0;
     case 220: return linux_getdents64(frame);
     case 221: return sys_fcntl(frame);
+    case 296: return linux_mkdirat(frame);
+    case 301: return linux_unlinkat(frame);
+    case 302: return linux_renameat(frame);
     case 224: return (int)current->pid;
     case 240: {
         u32 op = frame->ebx & 0x7f;
@@ -3360,6 +3425,149 @@ static int linux_dispatch(struct trap_frame *frame)
     }
 }
 
+
+#define LINUX_AT_REMOVEDIR 0x200
+
+static int linux_abs_from_dir(int dirfd, const char *path, char *abs, u32 max)
+{
+    if (!path || (u32)path < 0x1000) {
+        return -EFAULT;
+    }
+    if (path[0] == '/' || dirfd == (int)LINUX_AT_FDCWD) {
+        return path_normalize(path, abs, max);
+    }
+    if (dirfd >= 0 && dirfd < FD_MAX && current->fds[dirfd].used &&
+            current->fds[dirfd].ofd &&
+            current->fds[dirfd].ofd->path[0]) {
+        const char *base = current->fds[dirfd].ofd->path;
+        u32 bl = (u32)strlen(base);
+        u32 pl = (u32)strlen(path);
+        if (bl + pl + 2 > max) {
+            return -ERANGE;
+        }
+        memcpy((u8 *)abs, (const u8 *)base, bl);
+        abs[bl] = '/';
+        memcpy((u8 *)(abs + bl + 1), (const u8 *)path, pl + 1);
+        return 0;
+    }
+    return -ENOSYS;
+}
+
+static int linux_mkdirat(struct trap_frame *frame)
+{
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ebx, (const char *)frame->ecx,
+                               abs, sizeof(abs));
+    if (r < 0) {
+        return r;
+    }
+    frame->ebx = (u32)abs;
+    return sys_mkdir(frame);
+}
+
+static int linux_unlinkat(struct trap_frame *frame)
+{
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ebx, (const char *)frame->ecx,
+                               abs, sizeof(abs));
+    if (r < 0) {
+        return r;
+    }
+    frame->ebx = (u32)abs;
+    if (frame->edx & LINUX_AT_REMOVEDIR) {
+        return sys_rmdir(frame);
+    }
+    return sys_unlink(frame);
+}
+
+static int linux_renameat(struct trap_frame *frame)
+{
+    char a[160], b[160];
+    int r = linux_abs_from_dir((int)frame->ebx, (const char *)frame->ecx,
+                               a, sizeof(a));
+    if (r < 0) {
+        return r;
+    }
+    r = linux_abs_from_dir((int)frame->edx, (const char *)frame->esi,
+                           b, sizeof(b));
+    if (r < 0) {
+        return r;
+    }
+    frame->ebx = (u32)a;
+    frame->ecx = (u32)b;
+    return sys_rename(frame);
+}
+
+static int linux_fchdir(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
+            current->fds[fd].kind != FD_DIR ||
+            !current->fds[fd].ofd || !current->fds[fd].ofd->path[0]) {
+        return -EBADF;
+    }
+    copy_string(current->cwd, current->fds[fd].ofd->path,
+                sizeof(current->cwd));
+    return 0;
+}
+
+static int tty_canon_read(struct tty *t, u8 *buf, u32 count)
+{
+    if (!t || !buf || !count) {
+        return -EINVAL;
+    }
+    if (t->in_pos >= t->in_len) {
+        t->in_len = 0;
+        t->in_pos = 0;
+        for (;;) {
+            int c = kbd_getchar();
+            if (c < 0) {
+                sti();
+                while ((c = kbd_getchar()) < 0) {
+                    hlt();
+                }
+                cli();
+            }
+            if (c == '\r') {
+                c = '\n';
+            }
+            if (c == '\b' || c == 0x7f) {
+                if (t->in_len > 0) {
+                    t->in_len--;
+                    display_write(t, "\b \b", 3);
+                }
+                continue;
+            }
+            if (c == '\n') {
+                display_write(t, "\n", 1);
+                if (t->in_len < sizeof(t->inbuf) - 1) {
+                    t->inbuf[t->in_len++] = '\n';
+                }
+                break;
+            }
+            if (c >= ' ') {
+                if (t->in_len < sizeof(t->inbuf) - 1) {
+                    char ch = (char)c;
+                    t->inbuf[t->in_len++] = ch;
+                    display_write(t, &ch, 1);
+                }
+            }
+        }
+    }
+    {
+        u32 n = t->in_len - t->in_pos;
+        if (n > count) {
+            n = count;
+        }
+        memcpy(buf, (u8 *)(t->inbuf + t->in_pos), n);
+        t->in_pos += n;
+        if (t->in_pos >= t->in_len) {
+            t->in_pos = 0;
+            t->in_len = 0;
+        }
+        return (int)n;
+    }
+}
 
 static int linux_syscall_handler(struct trap_frame *frame)
 {

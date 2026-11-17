@@ -29,6 +29,8 @@ void init_tty()
         tty[i].termios.c_ispeed = 38400;
         tty[i].termios.c_ospeed = 38400;
         tty[i].pgrp = 0;
+        tty[i].in_len = 0;
+        tty[i].in_pos = 0;
         for (j = 0; j < TTY_COLS * TTY_ROWS; j++) {
             tty[i].buffer[j] = 0x20 | (0x07 << 8);
         }

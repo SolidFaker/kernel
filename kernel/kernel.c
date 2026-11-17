@@ -11,6 +11,7 @@
 #include "drivers/display.h"
 #include "drivers/fbcon.h"
 #include "net.h"
+#include "jfs.h"
 #include "drivers/timer.h"
 #include "drivers/keyboard.h"
 #include "drivers/tty.h"
@@ -43,6 +44,7 @@ void kernel_start(void)
 
     // filesystem init
     fs_root = init_vfs();
+    jfs_init();
 
     // initialises system call
     init_syscall();
