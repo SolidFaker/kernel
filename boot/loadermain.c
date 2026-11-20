@@ -13,7 +13,7 @@ struct myfs_entry *entries = NULL;
 struct myfs_entry *find_file(const char *name)
 {
     u8 i;
-    for (i = 0; i < 64; i++) {
+    for (i = 0; header && i < header->entry_num && i < MYFS_ENTRY_NUM; i++) {
         if (entries[i].entry_type == MYFS_FILE) {
             if (strcmp(entries[i].entry_name, name) == 0) {
                 return &entries[i];

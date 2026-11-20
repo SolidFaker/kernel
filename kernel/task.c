@@ -23,6 +23,9 @@ void fds_init_std(struct task_struct *task)
     task->fds[1].kind = FD_TTY_OUT;
     task->fds[2].used = 1;
     task->fds[2].kind = FD_TTY_OUT;
+    task->fds[0].ofd = ofd_alloc();
+    task->fds[1].ofd = ofd_alloc();
+    task->fds[2].ofd = ofd_alloc();
 }
 
 // System idle task
@@ -36,24 +39,37 @@ u32 task_idle(__UNUSED__ void *arg)
 }
 
 // Boot-time launcher for the user world: drops to CPL3 on the per-task
-// user stack, then execs the shell. It runs only for a moment - the
-// exec replaces this task with shell.elf, and this code never runs again.
+// user stack, then execs Bash with toybox and the native shell as fallbacks.
+// A successful exec replaces this task, so this code never runs again.
 u32 task_init(__UNUSED__ void *arg)
 {
+#ifdef AUTO_DEMO
+    static const char *bash_argv[] = {
+        "bash", "--norc", "/system/share/tests/posix-test.sh", 0
+    };
+#else
+    static const char *bash_argv[] = {
+        "bash", "--norc", "-i", 0
+    };
+#endif
     static const char *toy_argv[] = {
         "toybox", "sh", "-i", 0
     };
     static const char *toy_envp[] = {
-        "PATH=/", "HOME=/", "TERM=linux", 0
+        "PATH=/system/bin:/profiles/users/root/bin",
+        "HOME=/home/root", "TERM=linux", "USER=root",
+        "LOGNAME=root", "SHELL=/system/bin/bash", 0
     };
 
     asm volatile ("movl %0, %%ebp"::"r"((u32)current->user_stack));
     asm volatile ("movl %0, %%esp"::"r"((u32)current->user_stack + USER_STACK_SIZE));
 
     switch_to_user_mode();
-    if (execve("toybox.elf", (char *const *)toy_argv,
-               (char *const *)toy_envp) < 0) {
-        execve("shell.elf", 0, 0);
+    if (execve("/system/bin/bash", (char *const *)bash_argv,
+               (char *const *)toy_envp) < 0 &&
+            execve("/system/bin/toybox.elf", (char *const *)toy_argv,
+                   (char *const *)toy_envp) < 0) {
+        execve("/system/bin/shell.elf", 0, 0);
         print_str("shell exec failed\n");
         exit(1);
     }
@@ -152,6 +168,7 @@ struct task_struct *alloc_task()
         (struct task_struct *)kmalloc(sizeof(struct task_struct));
     new_task->context = 
         (struct task_context *)kmalloc(sizeof(struct task_context));
+    memset((u8 *)new_task->context, 0, sizeof(struct task_context));
     u8 *kstack = (u8 *)kmalloc(KERNEL_STACK_SIZE);
     u8 *pstack = (u8 *)kmalloc(USER_STACK_SIZE);
     assert(kstack != NULL && pstack != NULL, "kern_thread: kmalloc error");

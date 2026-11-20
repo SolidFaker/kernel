@@ -18,6 +18,7 @@ struct task_context {
     u32 esi;
     u32 edi;
     u32 eflags;
+    u32 eax;
 }__attribute__((packed));
 
 struct mm_struct {

@@ -131,7 +131,7 @@ int main(int argc, char **argv)
     check(stat("/libcfile", &st) == 0 && st.st_size == 15, "stat");
     check(unlink("/libcfile") == 0, "unlink");
 
-    d = opendir("/");
+    d = opendir("/system/share/doc");
     if (d) {
         while ((de = readdir(d)) != 0) {
             if (strcmp(de->d_name, "README") == 0) {
@@ -361,7 +361,7 @@ int main(int argc, char **argv)
         envs[1] = 0;
         pid = fork();
         if (pid == 0) {
-            execve("libctest.elf", args, envs);
+            execve("/system/bin/libctest.elf", args, envs);
             _exit(127);
         }
         waitpid(pid, &st2, 0);

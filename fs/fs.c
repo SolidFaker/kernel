@@ -15,6 +15,9 @@ u32 read_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
 
 int write_fs(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
 {
+    if (!node || (node->flags & FS_READONLY)) {
+        return -EROFS;
+    }
     if (node->write != 0) {
         return node->write(node, offset, size, buffer);
     }
@@ -59,7 +62,8 @@ struct fs_node *finddir_fs(struct fs_node *node, char *name)
 
 struct fs_node *create_fs(struct fs_node *dir, const char *name, int is_dir)
 {
-    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->create) {
+    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->create ||
+            (dir->flags & FS_READONLY)) {
         return 0;
     }
     return dir->create(dir, (char *)name, (u32)is_dir);
@@ -67,8 +71,14 @@ struct fs_node *create_fs(struct fs_node *dir, const char *name, int is_dir)
 
 int unlink_fs(struct fs_node *dir, const char *name)
 {
-    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->unlink) {
+    struct fs_node *target;
+    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->unlink ||
+            (dir->flags & FS_READONLY)) {
         return -EROFS;
+    }
+    target = finddir_fs(dir, (char *)name);
+    if (target && (target->flags & FS_APPEND_ONLY)) {
+        return -EPERM;
     }
     return dir->unlink(dir, (char *)name);
 }
@@ -80,6 +90,15 @@ int rename_fs(struct fs_node *olddir, const char *name,
             !newdir || (newdir->flags & 0x7) != FS_DIRECTORY) {
         return -EXDEV;
     }
+    if ((olddir->flags & FS_READONLY) || (newdir->flags & FS_READONLY)) {
+        return -EROFS;
+    }
+    {
+        struct fs_node *target = finddir_fs(olddir, (char *)name);
+        if (target && (target->flags & FS_APPEND_ONLY)) {
+            return -EPERM;
+        }
+    }
     return olddir->rename(olddir, (char *)name, newdir, (char *)newname);
 }
 
@@ -88,5 +107,18 @@ int truncate_fs(struct fs_node *node, u32 length)
     if (!node || !node->truncate) {
         return -EINVAL;
     }
+    if (node->flags & (FS_READONLY | FS_APPEND_ONLY)) {
+        return -EPERM;
+    }
     return node->truncate(node, length);
+}
+
+struct fs_node *symlink_fs(struct fs_node *dir, const char *name,
+                           const char *target)
+{
+    if (!dir || (dir->flags & 0x7) != FS_DIRECTORY || !dir->symlink ||
+            (dir->flags & FS_READONLY)) {
+        return 0;
+    }
+    return dir->symlink(dir, (char *)name, (char *)target);
 }

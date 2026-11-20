@@ -17,17 +17,17 @@ typedef unsigned int   u32;
 #ifdef __i386__
 static inline void cli(void)
 {
-    asm volatile("cli");
+    asm volatile("cli" ::: "memory", "cc");
 }
 
 static inline void hlt(void)
 {
-    asm volatile("hlt");
+    asm volatile("hlt" ::: "memory", "cc");
 }
 
 static inline void sti(void)
 {
-    asm volatile("sti");
+    asm volatile("sti" ::: "memory", "cc");
 }
 
 // Save EFLAGS and disable interrupts; pair with local_irq_restore().

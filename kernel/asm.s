@@ -20,22 +20,26 @@ enter_user_mode:
 .global switch_task
 switch_task:
 # save current content
-    movl 4(%esp), %eax # current env pointer
+    pushl %eax
+    movl 8(%esp), %eax # current env pointer
 
-    push (%esp)
-    pop  (%eax)
-    movl %esp,  4(%eax) 
-    movl %ebp,  8(%eax) 
-    movl %ebx, 12(%eax) 
-    movl %ecx, 16(%eax) 
-    movl %edx, 20(%eax) 
-    movl %esi, 24(%eax) 
-    movl %edi, 28(%eax) 
+    movl %ecx, 16(%eax)
+    movl 4(%esp), %ecx
+    movl %ecx,  0(%eax)
+    leal 4(%esp), %ecx
+    movl %ecx,  4(%eax)
+    movl %ebp,  8(%eax)
+    movl %ebx, 12(%eax)
+    movl %edx, 20(%eax)
+    movl %esi, 24(%eax)
+    movl %edi, 28(%eax)
     pushf
     pop  32(%eax)
+    movl (%esp), %ecx
+    movl %ecx, 36(%eax)
 
 # switch to next
-    movl  8(%esp), %eax # next env pointer
+    movl  12(%esp), %eax # next env pointer
 
     movl  4(%eax), %esp
     movl  8(%eax), %ebp
@@ -45,9 +49,9 @@ switch_task:
     movl 24(%eax), %esi
     movl 28(%eax), %edi
     push 32(%eax)
-# push %eax
     popf
     push (%eax)
+    movl 36(%eax), %eax
     ret
 
 .global tss_flush    # Allows our C code to call tss_flush().

@@ -8,6 +8,7 @@
 #define MYFS_MAGIC      0xEB001234
 #define MYFS_DIR        1
 #define MYFS_FILE       2
+#define MYFS_ENTRY_NUM  128
 
 struct myfs_struct {
     u32 magic;

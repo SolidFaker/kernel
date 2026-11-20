@@ -8,13 +8,18 @@ macOS:
 brew install i686-elf-gcc qemu
 ```
 
-Optional for the musl/toybox userland:
+External userland build products used by `make all`:
 
 - `MUSL_DIR=/tmp/musl-install` — static i386 musl 1.2.5 headers and libraries
 - `TOYBOX_BIN=/tmp/toybox-master/toybox` — toybox multicall binary built against musl
+- `BASH_BIN=/tmp/bash-build/bash` — static i386 Bash 5.2 with Readline
+- `COREUTILS_BIN=/tmp/coreutils-build/src/coreutils` — Coreutils 9.5 single binary
+- `COREUTILS_BUILD=/tmp/coreutils-build` — build tree containing `src/coreutils.h`
 
 Windows: use Git Bash and `build-win.sh`; the script expects the cross toolchain under
-`I:/tools` (override with `CROSS=` / `HOSTCC=`).
+`I:/tools` (override with `CROSS=` / `HOSTCC=`). Its default userland paths are
+`I:/tools/posix/build/bash/bash` and `I:/tools/posix/build/coreutils/src/coreutils`;
+`BASH_BIN=`, `COREUTILS_BIN=` and `COREUTILS_BUILD=` can override them.
 
 ## Targets
 
@@ -52,8 +57,10 @@ qemu-system-i386 -m 64 -drive file=build/80m.img,format=raw,if=ide \
   -nic user,model=e1000 -no-reboot
 ```
 
-The default shell is toybox (`sh`); the native `shell.elf` remains available as a
-fallback when toybox is absent.
+The default shell is Bash. Toybox `sh` and the native `shell.elf` remain available
+as fallbacks when their binaries are present. Coreutils uses one static binary plus
+small shebang entry points, so the image does not contain a separate libc copy for
+every utility.
 
 ## Headless debug
 
@@ -73,5 +80,7 @@ qemu-system-i386 -m 64 -drive file=build/80m.img,format=raw,if=ide \
   -nic user,model=e1000 -no-reboot
 ```
 
-`build-win.sh` produces the same `build/` layout, but does not build musl/toybox; the
-kernel falls back to `shell.elf`.
+`build-win.sh` produces the same `build/` layout and packages Bash/Coreutils, but does
+not build toybox or `hello_musl.elf`. Set `EXTRA_CFLAGS=-DDEBUG_E9` for headless
+logging. `AUTO_DEMO=1` runs `user/posix-test.sh` through Bash instead of starting the
+interactive shell.

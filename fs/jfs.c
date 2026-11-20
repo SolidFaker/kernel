@@ -106,46 +106,11 @@ static u32 rec_crc(struct jfs_rec *r, const u8 *data)
 
 static struct fs_node *lookup_path(const char *path)
 {
-    char abs[160];
-    char *p;
-    struct fs_node *cur = fs_root;
-    u32 len = (u32)strlen(path);
-
-    if (!path || !*path) {
+    struct fs_node *node = 0;
+    if (!path || vfs_resolve(path, &node, 1) < 0) {
         return 0;
     }
-    if (path[0] != '/') {
-        abs[0] = '/';
-        if (len > sizeof(abs) - 2) {
-            return 0;
-        }
-        memcpy((u8 *)(abs + 1), (const u8 *)path, len + 1);
-    } else {
-        if (len >= sizeof(abs)) {
-            return 0;
-        }
-        memcpy((u8 *)abs, (const u8 *)path, len + 1);
-    }
-
-    p = abs;
-    while (*p) {
-        char name[128];
-        u32 n = 0;
-        while (*p == '/') p++;
-        if (!*p) break;
-        while (*p && *p != '/' && n < sizeof(name) - 1) {
-            name[n++] = *p++;
-        }
-        name[n] = 0;
-        if (!strcmp(name, ".")) continue;
-        if (!strcmp(name, "..")) { cur = fs_root; continue; }
-        if (!cur || (cur->flags & 0x7) != FS_DIRECTORY || !cur->finddir) {
-            return 0;
-        }
-        cur = cur->finddir(cur, name);
-        if (!cur) return 0;
-    }
-    return cur;
+    return node;
 }
 
 static int split_parent(const char *path, struct fs_node **dir, char *name)
@@ -224,6 +189,18 @@ static void jfs_apply(struct jfs_rec *r, u8 *data)
         node = lookup_path(r->path);
         if (node) {
             node->mask = r->offset & 07777;
+        }
+        break;
+    case JFS_SYMLINK:
+        if (lookup_path(r->path)) {
+            return;
+        }
+        if (split_parent(r->path, &dir, name) == 0 && data &&
+                r->data_len < 160) {
+            char target[160];
+            memcpy((u8 *)target, data, r->data_len);
+            target[r->data_len] = 0;
+            symlink_fs(dir, name, target);
         }
         break;
     case JFS_RENAME:
@@ -324,6 +301,9 @@ static int snapshot_dir(struct fs_node *dir, const char *prefix,
             path[pl] = '/';
             memcpy((u8 *)(path + pl + 1), (const u8 *)de->name, nl + 1);
         }
+        if (vfs_no_persist_path(path)) {
+            continue;
+        }
 
         if ((child->flags & 0x7) == FS_DIRECTORY) {
             int r = jfs_emit(base, hp, sp, JFS_CREATE_DIR, path, 0,
@@ -332,6 +312,15 @@ static int snapshot_dir(struct fs_node *dir, const char *prefix,
                 return r;
             }
             r = snapshot_dir(child, path, base, hp, sp, data);
+            if (r < 0) {
+                return r;
+            }
+        } else if ((child->flags & 0x7) == FS_SYMLINK) {
+            char target[160];
+            u32 n = read_fs(child, 0, sizeof(target) - 1, (u8 *)target);
+            target[n] = 0;
+            int r = jfs_emit(base, hp, sp, JFS_SYMLINK, path, 0,
+                             0777, (u8 *)target, n);
             if (r < 0) {
                 return r;
             }
@@ -477,7 +466,8 @@ int jfs_log(u32 type, const char *path, const char *path2, u32 offset,
     u32 sectors;
     int r;
 
-    if (!jfs_ready) {
+    if (!jfs_ready || vfs_no_persist_path(path) ||
+            (path2 && vfs_no_persist_path(path2))) {
         return 0;
     }
     flags = local_irq_save();

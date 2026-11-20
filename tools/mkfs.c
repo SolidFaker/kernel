@@ -5,7 +5,7 @@
 #include "common.h"
 
 #define SECTOR_SIZE 512
-#define ENTRY_NUM   64
+#define ENTRY_NUM   MYFS_ENTRY_NUM
 
 struct myfs_struct header;
 struct myfs_entry entries[ENTRY_NUM];

@@ -4,9 +4,12 @@
 
 `tools/mkfs.c` writes the read-only `myfs` image into `build/kernel.img`:
 
-- header + entries at sector 10
+- header + up to 128 entries at sector 10
 - files laid out sector-aligned
-- imported at boot into a writable ramfs by `fs/vfs.c`
+- imported at boot into a writable ramfs by `fs/vfs.c`, then placed into `/boot` or
+  content-addressed packages under `/store`; no executable files remain at `/`
+- Coreutils entry points are small shebang text files in the Coreutils package;
+  `/system` and `/profiles` expose them through symbolic links
 
 ## ramfs
 
@@ -32,7 +35,9 @@ log-structured filesystem.
 - two 8 MiB journal regions (region A and B); records are appended to the active
   region
 - records: `CREATE_FILE`, `CREATE_DIR`, `WRITE`, `TRUNCATE`, `UNLINK`, `RMDIR`,
-  `RENAME`, `CHMOD`
+  `RENAME`, `CHMOD`, `SYMLINK`
+- `/tmp` and `/run` are excluded from records and checkpoints; `/dev`, `/proc` and
+  `/sys` are regenerated as kernel interfaces
 - each record stores path/path2, offset, length, sequence number and CRC32
 - `CREATE_*` and `CHMOD` records carry permission bits; checkpoints preserve modes
 - commit protocol: invalidate header → write data sectors → committed header →
@@ -42,32 +47,31 @@ log-structured filesystem.
 
 1. If the superblock has no valid snapshot, import the read-only myfs image into
    ramfs (boot/module partition)
-2. If a snapshot exists, start from an empty ramfs and rebuild it only from the
-   journal
+2. If a snapshot exists, start from a fresh root tree and rebuild persistent content
+   only from the journal
 3. Scan the active region up to the checkpointed head, validate CRCs and replay
    records in order
 4. When the region is over 75% full (or on the first boot), checkpoint the whole
    tree into the inactive region and switch the superblock atomically
 
-After the first checkpoint the journal alone is authoritative: adding, modifying,
-renaming and deleting files persists across reboots, including deleting files that
-came from the original myfs image. The 16-bit loader still uses the raw myfs boot
-area for `kernel.elf`; that is a boot partition, not the root filesystem.
+After the first checkpoint the journal alone is authoritative for mutable areas:
+adding, modifying, renaming, deleting files and creating symbolic links persist across
+reboots. `/store` remains read-only after replay. The 16-bit loader still uses the raw
+myfs boot area for `kernel.elf`; that is a boot partition, not the root filesystem.
 
 ### Persistence test
 
 ```sh
-mkdir /docs
-echo hi > /docs/a
-rm -f /README
+mkdir /state/system/demo
+echo hi > /state/system/demo/a
+echo enabled > /config/system/demo
 # reboot
-ls /          # README is gone; docs is present
-cat /docs/a   # hi
+cat /state/system/demo/a  # hi
+cat /config/system/demo   # enabled
 ```
 
 ### Limitations
 
 - one checkpoint must fit in an 8 MiB region; very large trees can hit `ENOSPC`
 - superblock is updated per write (durable but slower than a batched journal)
-- no fsync/fdatasync; writes become durable when the journal record and flush
-  complete
+- fsync/fdatasync are simple disk flushes; there is no separate batched commit protocol

@@ -17,13 +17,13 @@ AR="${CROSS}ar"
 BUILD=build
 OUT="$BUILD/bin"
 OBJ="$BUILD/obj"
-CFLAGS="-c -g -Os -ffreestanding -Wall -Werror -fno-stack-protector -I./include"
+CFLAGS="-c -g -Os -ffreestanding -Wall -Werror -fno-stack-protector -I./include ${EXTRA_CFLAGS:-} ${AUTO_DEMO:+-DAUTO_DEMO}"
 
 "$CC" --version >/dev/null 2>&1 || { echo "cross gcc not found: $CC"; exit 1; }
 "$HOSTCC" --version >/dev/null 2>&1 || { echo "host gcc not found: $HOSTCC"; exit 1; }
 
 rm -rf "$BUILD"
-mkdir -p "$OUT" "$OBJ"
+mkdir -p "$OUT" "$OBJ/boot" "$OBJ/user" "$OBJ/user/libc"
 
 # ---- kernel ----
 OBJS=""
@@ -69,24 +69,48 @@ UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall -
 for f in user/libc/*.c; do
     o="$OBJ/user/libc/${f##*/}"
     o="${o%.c}.o"
-    "$CC" $UFLAGS -Iuser/libc/include "$f" -o "$o"
+    "$CC" -Iuser/libc/include $UFLAGS "$f" -o "$o"
 done
 "$AR" rcs "$BUILD/libc.a" "$OBJ"/user/libc/*.o
-"$CC" $UFLAGS -Iuser/libc/include user/libctest.c -o "$OBJ/user/libctest.o"
+"$CC" -Iuser/libc/include $UFLAGS user/libctest.c -o "$OBJ/user/libctest.o"
 "$LD" -Ttools/user_link.ld -static -nostdlib --nmagic \
     "$OBJ/user/libc/crt0.o" "$OBJ/user/libctest.o" "$BUILD/libc.a" -o "$OUT/libctest.elf"
-"$CC" $UFLAGS -Iuser/libc/include user/nettest.c -o "$OBJ/user/nettest.o"
+"$CC" -Iuser/libc/include $UFLAGS user/nettest.c -o "$OBJ/user/nettest.o"
 "$LD" -Ttools/user_link.ld -static -nostdlib --nmagic \
     "$OBJ/user/libc/crt0.o" "$OBJ/user/nettest.o" "$BUILD/libc.a" -o "$OUT/nettest.elf"
 
+# ---- musl Bash + single-binary Coreutils ----
+BASH_BIN="${BASH_BIN:-I:/tools/posix/build/bash/bash}"
+COREUTILS_BIN="${COREUTILS_BIN:-I:/tools/posix/build/coreutils/src/coreutils}"
+COREUTILS_BUILD="${COREUTILS_BUILD:-I:/tools/posix/build/coreutils}"
+[ -f "$BASH_BIN" ] || { echo "bash not found: $BASH_BIN"; exit 1; }
+[ -f "$COREUTILS_BIN" ] || { echo "coreutils not found: $COREUTILS_BIN"; exit 1; }
+cp "$BASH_BIN" "$OUT/bash.elf"
+cp "$COREUTILS_BIN" "$OUT/coreutils.elf"
+for f in "$OUT/bash.elf" "$OUT/coreutils.elf"; do
+    perl -e 'open my $f, "+<", $ARGV[0] or die $!; binmode $f; seek $f, 7, 0; print $f chr(0xff)' "$f"
+done
+
 # ---- host tool: filesystem image ----
 "$HOSTCC" -Os -I./include tools/mkfs.c -o "$BUILD/mkfs_kernel.exe"
-MKFS_OUT="$BUILD/kernel.img" ./"$BUILD/mkfs_kernel.exe" \
-    "$OUT/loader.bin" loader.bin "$OUT/kernel.elf" kernel.elf \
-    "$OUT/hello.elf" hello.elf "$OUT/shell.elf" shell.elf \
-    "$OUT/gfx.elf" gfx.elf "$OUT/postest.elf" postest.elf \
-    "$OUT/libctest.elf" libctest.elf "$OUT/nettest.elf" nettest.elf \
-    "$OUT/toyrun.elf" toyrun.elf ./README.md README
+mkfs_args=(
+    "$OUT/loader.bin" loader.bin "$OUT/kernel.elf" kernel.elf
+    "$OUT/hello.elf" hello.elf "$OUT/shell.elf" shell.elf
+    "$OUT/gfx.elf" gfx.elf "$OUT/postest.elf" postest.elf
+    "$OUT/libctest.elf" libctest.elf "$OUT/nettest.elf" nettest.elf
+    "$OUT/toyrun.elf" toyrun.elf "$OUT/bash.elf" bash.elf
+    "$OUT/coreutils.elf" coreutils.elf ./README.md README
+    ./user/posix-test.sh posix-test.sh
+)
+mkdir -p "$BUILD/posix-bin"
+for name in $(awk -F'"' '/^SINGLE_BINARY_PROGRAM/ {print $2}' "$COREUTILS_BUILD/src/coreutils.h"); do
+    wrapper="$BUILD/posix-bin/$name"
+    entry="$name"
+    if [ "$name" = ginstall ]; then entry=install; fi
+    printf '#!/system/bin/coreutils --coreutils-prog-shebang=%s\n' "$name" > "$wrapper"
+    mkfs_args+=("$wrapper" "$entry")
+done
+MKFS_OUT="$BUILD/kernel.img" ./"$BUILD/mkfs_kernel.exe" "${mkfs_args[@]}"
 
 # ---- disk image ----
 [ -f "$BUILD/80m.img" ] || dd if=/dev/zero of="$BUILD/80m.img" bs=1M count=80

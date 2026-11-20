@@ -88,8 +88,7 @@
 #define NR_chmod         80
 #define NR_fchmod        81
 
-/* open() flags (only the access mode is honoured; the filesystem is
-   read-only) */
+/* open() flags shared with the Linux i386 ABI. */
 #define O_RDONLY 0
 #define O_WRONLY 1
 #define O_RDWR   2
@@ -98,6 +97,10 @@
 #define O_TRUNC  01000
 #define O_APPEND 02000
 #define O_NONBLOCK 04000
+#define O_LARGEFILE 0100000
+#define O_DIRECTORY 0200000
+#define O_NOFOLLOW  0400000
+#define O_CLOEXEC  02000000
 
 /* lseek() whence */
 #define SEEK_SET 0

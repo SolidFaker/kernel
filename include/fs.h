@@ -11,6 +11,8 @@
 #define FS_PIPE        0x05
 #define FS_SYMLINK     0x06
 #define FS_MOUNTPOINT  0x08 // Is the file an active mountpoint?
+#define FS_READONLY    0x100
+#define FS_APPEND_ONLY 0x200
 
 // Per-task file descriptors (see struct task_struct)
 #define FD_MAX 16
@@ -65,6 +67,7 @@ typedef               int (*fn_unlink_fs)  (struct fs_node*,char *name);
 typedef               int (*fn_rename_fs)  (struct fs_node*,char *name,
                                              struct fs_node*,char *newname);
 typedef               int (*fn_truncate_fs)(struct fs_node*,u32 length);
+typedef struct fs_node * (*fn_symlink_fs)  (struct fs_node*,char *name,char *target);
 
 struct fs_node {
     char name[128]; // The filename
@@ -85,6 +88,7 @@ struct fs_node {
     fn_unlink_fs unlink;
     fn_rename_fs rename;
     fn_truncate_fs truncate;
+    fn_symlink_fs symlink;
     struct fs_node *ptr; // used by mountpoints and symlinks
 };
 
@@ -107,6 +111,8 @@ int unlink_fs(struct fs_node *dir, const char *name);
 int rename_fs(struct fs_node *olddir, const char *name,
               struct fs_node *newdir, const char *newname);
 int truncate_fs(struct fs_node *node, u32 length);
+struct fs_node *symlink_fs(struct fs_node *dir, const char *name,
+                           const char *target);
 
 struct fs_node *init_ramfs(void);
 void open_fs(struct fs_node *node, u8 read, u8 write);

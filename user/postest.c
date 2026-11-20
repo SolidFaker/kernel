@@ -189,11 +189,11 @@ static void getcwd_test(void)
 static void stat_test(void)
 {
     struct stat st;
-    int r = sys_call(NR_stat, (int)"README", (int)&st, 0);
+    int r = sys_call(NR_stat, (int)"/system/share/doc/README", (int)&st, 0);
     pass("stat README", r == 0 && S_ISREG(st.st_mode) && st.st_size > 0);
 
-    pass("access R_OK", sys_call(NR_access, (int)"README", R_OK, 0) == 0);
-    pass("access W_OK", sys_call(NR_access, (int)"README", W_OK, 0) == 0);
+    pass("access R_OK", sys_call(NR_access, (int)"/system/share/doc/README", R_OK, 0) == 0);
+    pass("access W_OK", sys_call(NR_access, (int)"/system/share/doc/README", W_OK, 0) == 0);
     pass("access ENOENT",
          sys_call(NR_access, (int)"no-such-file", F_OK, 0) < 0);
 }
@@ -219,7 +219,7 @@ static void misc_test(void)
 
 static void fcntl_test(void)
 {
-    int fd = open("README", O_RDONLY);
+    int fd = open("/system/share/doc/README", O_RDONLY);
     int dfd, off;
     char tmp[8];
 
@@ -392,7 +392,7 @@ static void mmap_test(void)
     pass("mprotect", mprotect(p, 8192, PROT_READ) == 0);
     pass("msync", sys_call(NR_msync, (int)p, 8192, 0) == 0);
 
-    fd = open("README", O_RDONLY);
+    fd = open("/system/share/doc/README", O_RDONLY);
     m = mmap(0, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
     pass("mmap file", (int)m > 0 && ((char *)m)[0] == '#' &&
          ((char *)m)[1] == ' ');

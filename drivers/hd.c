@@ -1,4 +1,5 @@
 #include "drivers/hd.h"
+#include "string.h"
 
 static void waitdisk(void)
 {
@@ -22,19 +23,26 @@ static void readsect(void *dst, u32 offset)
     insl(0x1F0, dst, SECTOR_SIZE/4);
 }
 
-// Read ’count’ byte at ’offset’ sector from kernel into physical address ’pa’.
-// Might copy more than asked.
-void readseg(u8* pa, u32 count, u32 offset)
+void readseg(u8 *pa, u32 count, u32 offset)
 {
-    u8* epa;
-    epa = pa + count;
-    pa -= offset % SECTOR_SIZE;
-    offset = (offset / SECTOR_SIZE) ;
-    // If this is too slow, we could read lots of sectors at a time.
-    // We’d write more to memory than asked, but it doesn’t matter −−
-    // we load in increasing order.
-    for(; pa < epa; pa += SECTOR_SIZE, offset++)
-        readsect(pa, offset);
+    u8 sector[SECTOR_SIZE];
+    u32 done = 0;
+
+    while (done < count) {
+        u32 current = offset + done;
+        u32 in_sector = current % SECTOR_SIZE;
+        u32 chunk = SECTOR_SIZE - in_sector;
+        if (chunk > count - done) {
+            chunk = count - done;
+        }
+        if (in_sector == 0 && chunk == SECTOR_SIZE) {
+            readsect(pa + done, current / SECTOR_SIZE);
+        } else {
+            readsect(sector, current / SECTOR_SIZE);
+            memcpy(pa + done, sector + in_sector, chunk);
+        }
+        done += chunk;
+    }
 }
 
 static void writesect(const void *src, u32 offset)

@@ -28,6 +28,8 @@ extern struct tty tty[TTY_NUMBER];
 void switch_tty(struct tty *tty);
 void tty_restore_display(void);
 void init_tty();
+int tty_input_ready(struct tty *tty);
+int tty_handle_control(struct tty *tty, u8 c);
 u32 task_tty(__UNUSED__ void *arg);
 
 #endif

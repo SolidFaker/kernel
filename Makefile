@@ -36,6 +36,9 @@ LIBC_OBJ = $(patsubst user/libc/%.c, $(OBJ)/user/libc/%.o, $(LIBC_CSRC))
 MUSL_DIR ?= /tmp/musl-install
 MUSL_LIBGCC := $(shell $(CC) -print-libgcc-file-name)
 TOYBOX_BIN ?= /tmp/toybox-master/toybox
+BASH_BIN ?= /tmp/bash-build/bash
+COREUTILS_BIN ?= /tmp/coreutils-build/src/coreutils
+COREUTILS_BUILD ?= /tmp/coreutils-build
 ASFLAGS = --32
 MAPFLAGS = -Map $(BUILD)/kernel.map
 KNL_LDFLAGS = -static -nostdlib --nmagic -melf_i386
@@ -50,6 +53,7 @@ USER_OBJ = $(addprefix $(OBJ)/user/, $(addsuffix .o, $(USER_SIMPLE)))
 USER_ELFS = $(addprefix $(BIN)/, $(addsuffix .elf, $(USER_SIMPLE)))
 USER_ELFS += $(BIN)/libctest.elf $(BIN)/nettest.elf
 USER_ELFS += $(BIN)/hello_musl.elf $(BIN)/toybox.elf
+USER_ELFS += $(BIN)/bash.elf $(BIN)/coreutils.elf
 
 # `all` starts with `clean`, so never run make with -j here
 .PHONY: all clean mkfs test test64
@@ -142,14 +146,34 @@ $(BIN)/toybox.elf: $(TOYBOX_BIN)
 	chmod +w $@
 	$(PYTHON) -c "p='$@';d=bytearray(open(p,'rb').read());d[7]=0xff;open(p,'wb').write(d)"
 
-$(KERNEL_IMG): $(MKFS) $(LOADER_BIN) $(KERNEL_ELF) $(USER_ELFS)
-	MKFS_OUT=$(KERNEL_IMG) $(MKFS) \
+$(BIN)/bash.elf: $(BASH_BIN)
+	@mkdir -p $(@D)
+	cp $(BASH_BIN) $@
+	$(PYTHON) -c "p='$@';d=bytearray(open(p,'rb').read());d[7]=0xff;open(p,'wb').write(d)"
+
+$(BIN)/coreutils.elf: $(COREUTILS_BIN)
+	@mkdir -p $(@D)
+	cp $(COREUTILS_BIN) $@
+	$(PYTHON) -c "p='$@';d=bytearray(open(p,'rb').read());d[7]=0xff;open(p,'wb').write(d)"
+
+$(KERNEL_IMG): $(MKFS) $(LOADER_BIN) $(KERNEL_ELF) $(USER_ELFS) $(COREUTILS_BUILD)/src/coreutils.h
+	@mkdir -p $(BUILD)/posix-bin
+	@set -- \
 		$(LOADER_BIN) loader.bin $(KERNEL_ELF) kernel.elf \
 		$(BIN)/hello.elf hello.elf $(BIN)/shell.elf shell.elf \
 		$(BIN)/gfx.elf gfx.elf $(BIN)/postest.elf postest.elf \
 		$(BIN)/libctest.elf libctest.elf $(BIN)/nettest.elf nettest.elf \
 		$(BIN)/hello_musl.elf hello_musl.elf $(BIN)/toybox.elf toybox.elf \
-		$(BIN)/toyrun.elf toyrun.elf ./README.md README
+		$(BIN)/toyrun.elf toyrun.elf $(BIN)/bash.elf bash.elf \
+		$(BIN)/coreutils.elf coreutils.elf ./README.md README \
+		./user/posix-test.sh posix-test.sh; \
+	for name in $$(awk -F'"' '/^SINGLE_BINARY_PROGRAM/ {print $$2}' $(COREUTILS_BUILD)/src/coreutils.h); do \
+		wrapper=$(BUILD)/posix-bin/$$name; entry=$$name; \
+		if test "$$name" = ginstall; then entry=install; fi; \
+		printf '#!/system/bin/coreutils --coreutils-prog-shebang=%s\n' "$$name" > "$$wrapper"; \
+		set -- "$$@" "$$wrapper" "$$entry"; \
+	done; \
+	MKFS_OUT=$(KERNEL_IMG) $(MKFS) "$$@"
 
 # create the target disk on a fresh clone
 $(DISKIMG):

@@ -148,6 +148,13 @@ static void kbd_putc(char c)
     kbd_head = next;
 }
 
+static void kbd_puts(const char *s)
+{
+    while (*s) {
+        kbd_putc(*s++);
+    }
+}
+
 int kbd_haschar(void)
 {
     return kbd_tail != kbd_head;
@@ -210,12 +217,27 @@ void keyboard_callback()
 {
     scancode = inb(0x60);
 
-    // Extended keys (arrows, Home...) send a 0xE0 prefix byte first.
-    // They have no printable character, so swallow the two-byte sequence
-    // instead of indexing the keymap with the prefix byte.
+    // Extended keys arrive with a 0xE0 prefix; emit ANSI/VT sequences for
+    // Readline and other non-canonical terminal consumers.
     if (ext_scan) {
         ext_scan = 0;
         pressed = 0;
+        if ((scancode & RELEASED_MASK) ||
+                is_controls_pressed(CONTROL) || is_controls_pressed(ALT)) {
+            return;
+        }
+        switch (scancode) {
+        case 0x47: kbd_puts("\x1b[H"); break;
+        case 0x48: kbd_puts("\x1b[A"); break;
+        case 0x49: kbd_puts("\x1b[5~"); break;
+        case 0x4B: kbd_puts("\x1b[D"); break;
+        case 0x4D: kbd_puts("\x1b[C"); break;
+        case 0x4F: kbd_puts("\x1b[F"); break;
+        case 0x50: kbd_puts("\x1b[B"); break;
+        case 0x51: kbd_puts("\x1b[6~"); break;
+        case 0x52: kbd_puts("\x1b[2~"); break;
+        case 0x53: kbd_puts("\x1b[3~"); break;
+        }
         return;
     }
     if (scancode == 0xE0) {
@@ -234,8 +256,25 @@ void keyboard_callback()
     }
     pressed = 1;
     set_control_code();
-    // control combos (alt+digit tty switching etc.) are not console input
-    if (is_controls_pressed(CONTROL) || is_controls_pressed(ALT)) {
+    // Alt combinations are reserved for tty switching.
+    if (is_controls_pressed(ALT)) {
+        return;
+    }
+    if (is_controls_pressed(CONTROL)) {
+        char key = (char)default_layout->scancodes[scancode];
+        u8 control = 0;
+        if (key >= 'a' && key <= 'z') {
+            control = (u8)(key - 'a' + 1);
+        } else if (key >= '@' && key <= '_') {
+            control = (u8)(key - '@');
+        } else if (key == '?') {
+            control = 0x7f;
+        } else {
+            return;
+        }
+        if (!tty_handle_control(tty_cur, control)) {
+            kbd_putc((char)control);
+        }
         return;
     }
     // capslock & shift mode

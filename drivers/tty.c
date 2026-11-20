@@ -3,6 +3,7 @@
 #include "drivers/display.h"
 #include "drivers/fbcon.h"
 #include "string.h"
+#include "signal.h"
 
 struct tty *tty_cur;
 
@@ -24,6 +25,14 @@ void init_tty()
         tty[i].termios.c_iflag = ICRNL;
         tty[i].termios.c_oflag = OPOST;
         tty[i].termios.c_lflag = ISIG | ICANON | ECHO | ECHOE;
+        tty[i].termios.c_cc[VINTR] = 3;
+        tty[i].termios.c_cc[VQUIT] = 28;
+        tty[i].termios.c_cc[VERASE] = 8;
+        tty[i].termios.c_cc[VKILL] = 21;
+        tty[i].termios.c_cc[VEOF] = 4;
+        tty[i].termios.c_cc[VSTART] = 17;
+        tty[i].termios.c_cc[VSTOP] = 19;
+        tty[i].termios.c_cc[VSUSP] = 26;
         tty[i].termios.c_cc[VMIN] = 1;
         tty[i].termios.c_cc[VTIME] = 0;
         tty[i].termios.c_ispeed = 38400;
@@ -62,6 +71,41 @@ u32 task_tty(__UNUSED__ void *arg)
         }
     }
     return 0;
+}
+
+int tty_input_ready(struct tty *t)
+{
+    return t && (t->in_pos < t->in_len || kbd_haschar());
+}
+
+int tty_handle_control(struct tty *t, u8 c)
+{
+    int sig = 0;
+    char echo[3];
+
+    if (!t || !(t->termios.c_lflag & ISIG)) {
+        return 0;
+    }
+    if (c == t->termios.c_cc[VINTR]) {
+        sig = SIGINT;
+    } else if (c == t->termios.c_cc[VQUIT]) {
+        sig = SIGQUIT;
+    }
+    if (!sig) {
+        return 0;
+    }
+    t->in_len = 0;
+    t->in_pos = 0;
+    if (t->termios.c_lflag & ECHO) {
+        echo[0] = '^';
+        echo[1] = (char)('@' + c);
+        echo[2] = '\n';
+        display_write(t, echo, sizeof(echo));
+    }
+    if (t->pgrp) {
+        signal_kill(-(int)t->pgrp, sig);
+    }
+    return 1;
 }
 
 void switch_tty(struct tty *tty)

@@ -118,6 +118,7 @@ struct sigaction {
 #define F_SETFD  2
 #define F_GETFL  3
 #define F_SETFL  4
+#define F_DUPFD_CLOEXEC 9
 
 #define FD_CLOEXEC 1
 
@@ -244,8 +245,16 @@ struct termios {
 #define ECHOE  0000020
 #define ICRNL  0000400
 #define OPOST  0000001
-#define VMIN   6
+#define VINTR  0
+#define VQUIT  1
+#define VERASE 2
+#define VKILL  3
+#define VEOF   4
 #define VTIME  5
+#define VMIN   6
+#define VSTART 8
+#define VSTOP  9
+#define VSUSP  10
 
 #define TCGETS     0x5401
 #define TCSETS     0x5402

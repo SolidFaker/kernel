@@ -73,7 +73,7 @@ static int waitpid(int pid, int *status)
 {
     int a;
     __asm__ volatile("int $0x80" : "=a" (a)
-                     : "0" (NR_waitpid), "b" (pid), "c" (status)
+                     : "0" (NR_waitpid), "b" (pid), "c" (status), "d" (0)
                      : "memory");
     return a;
 }
@@ -348,7 +348,7 @@ void _start(void)
     run_cmd("help", "");
     run_cmd("ps", "");
     run_cmd("ls", "");
-    run_cmd("cat", "README");
+    run_cmd("cat", "/system/share/doc/README");
     run_cmd("run", "hello.elf");
     run_cmd("ps", "");
 #endif

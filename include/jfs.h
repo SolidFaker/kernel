@@ -16,6 +16,7 @@
 #define JFS_RMDIR       6
 #define JFS_RENAME      7
 #define JFS_CHMOD       8
+#define JFS_SYMLINK     9
 
 struct jfs_rec {
     u32 magic;

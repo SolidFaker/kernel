@@ -6,7 +6,9 @@ use the in-tree libc in `user/libc/` (`crt0.o + libc.a`).
 ## Processes and descriptors
 
 - `fork`, `execve` (argv/envp copied to the new stack), `exit`, `waitpid` incl. `WNOHANG`
-- shared open file descriptions: `dup`, `dup2`, `fcntl`, inherited offsets across fork
+- `#!` script execution with one interpreter argument; Bash and Coreutils use this path
+- shared open file descriptions: `dup`, `dup2`, `dup3`, `fcntl`, inherited offsets across fork
+- `FD_CLOEXEC`/`O_CLOEXEC`, `F_DUPFD_CLOEXEC`, and `pipe2` flags
 - `pipe`, `O_NONBLOCK`, `poll`, `select`
 - `getpid`, `getppid`, `uname`, `isatty`, `brk`
 - errno is returned as a negative value; `include/errno.h`
@@ -33,6 +35,12 @@ use the in-tree libc in `user/libc/` (`crt0.o + libc.a`).
 - `SIGCHLD` on child exit
 - `setpgid/getpgid/getpgrp/setsid`, `tcgetpgrp/tcsetpgrp`
 - `termios`/`ioctl`: `TCGETS`/`TCSETS`, `TIOCGWINSZ`, `FIOCLEX`/`FIONCLEX`
+- canonical and Readline-style non-canonical tty reads; `poll`/`pselect` also see
+  characters already buffered by the tty layer
+- `ISIG` sends `SIGINT`/`SIGQUIT` to the foreground process group (`Ctrl+C`/`Ctrl+\`),
+  including programs such as `yes` that never read stdin
+- `VEOF`, `VERASE`, `VKILL` and ANSI arrow/Home/End/Delete sequences support normal
+  shell editing and Readline history
 
 ## Sockets and threads
 
@@ -55,6 +63,9 @@ Self-tests:
 posix    # 63 POSIX checks
 libc     # stdio, malloc, dirent, signals, sockets, pthreads, environment, qsort
 ```
+
+On Windows, `AUTO_DEMO=1 EXTRA_CFLAGS=-DDEBUG_E9 bash build-win.sh` additionally runs
+`user/posix-test.sh` through Bash and reports `POSIX_TEST_OK` over the E9 debug log.
 
 Known gaps: real-time signals (`sigqueue`), IPv6, DNS resolver, full POSIX threads
 attributes/cancellation, locale/regex and other optional libc areas.

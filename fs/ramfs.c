@@ -24,6 +24,8 @@ static struct fs_node *ri_create(struct fs_node *dir, char *name, u32 is_dir);
 static int ri_unlink(struct fs_node *dir, char *name);
 static int ri_rename(struct fs_node *olddir, char *name,
                      struct fs_node *newdir, char *newname);
+static struct fs_node *ri_symlink(struct fs_node *dir, char *name,
+                                  char *target);
 
 static u32 ri_read(struct fs_node *node, u32 offset, u32 size, u8 *buffer)
 {
@@ -168,6 +170,7 @@ static void ri_init_node(struct ramfs_inode *ri, const char *name,
         ri->node.create = &ri_create;
         ri->node.unlink = &ri_unlink;
         ri->node.rename = &ri_rename;
+        ri->node.symlink = &ri_symlink;
     } else {
         ri->node.flags = FS_FILE;
         ri->node.read = &ri_read;
@@ -209,9 +212,41 @@ static struct fs_node *ri_create(struct fs_node *dir, char *name, u32 is_dir)
         return 0;
     }
     ri_init_node(ri, name, is_dir != 0, d);
+    ri->node.flags |= d->node.flags & FS_APPEND_ONLY;
     ri->sibling = d->child;
     d->child = ri;
     return &ri->node;
+}
+
+static struct fs_node *ri_symlink(struct fs_node *dir, char *name,
+                                  char *target)
+{
+    struct fs_node *node;
+    struct ramfs_inode *ri;
+    u32 len;
+
+    if (!target || !*target) {
+        return 0;
+    }
+    node = ri_create(dir, name, 0);
+    if (!node) {
+        return 0;
+    }
+    ri = (struct ramfs_inode *)node;
+    len = (u32)strlen(target);
+    if (ri_grow(ri, len) < 0) {
+        ri_unlink(dir, name);
+        return 0;
+    }
+    memcpy(ri->data, (const u8 *)target, len);
+    ri->size = len;
+    node->length = len;
+    node->flags = (node->flags & FS_APPEND_ONLY) | FS_SYMLINK;
+    node->mask = 0777;
+    node->read = &ri_read;
+    node->write = 0;
+    node->truncate = 0;
+    return node;
 }
 
 static int ri_unlink(struct fs_node *dir, char *name)

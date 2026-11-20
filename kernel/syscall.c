@@ -4,6 +4,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/timer.h"
 #include "drivers/tty.h"
+#include "drivers/hd.h"
 #include "elf.h"
 #include "errno.h"
 #include "fs.h"
@@ -115,47 +116,52 @@ static int path_normalize(const char *path, char *out, u32 out_size)
     return 0;
 }
 
+static int path_absolute(const char *path, char *out, u32 out_size)
+{
+    u32 len = (u32)strlen(path);
+    if (path[0] == '/') {
+        if (len + 1 > out_size) return -ERANGE;
+        memcpy((u8 *)out, (const u8 *)path, len + 1);
+        return 0;
+    }
+    {
+        u32 cwd_len = (u32)strlen(current->cwd);
+        if (cwd_len + len + 2 > out_size) return -ERANGE;
+        memcpy((u8 *)out, (const u8 *)current->cwd, cwd_len);
+        out[cwd_len] = '/';
+        memcpy((u8 *)out + cwd_len + 1, (const u8 *)path, len + 1);
+    }
+    return 0;
+}
+
 static int resolve_path(const char *path, struct fs_node **out)
 {
     char abs[256];
-    char *p;
-    struct fs_node *cur;
     int r;
 
     if ((u32)path < 0x1000) {
         return -EFAULT;
     }
-    r = path_normalize(path, abs, sizeof(abs));
+    r = path_absolute(path, abs, sizeof(abs));
     if (r < 0) {
         return r;
     }
+    return vfs_resolve(abs, out, 1);
+}
 
-    cur = fs_root;
-    p = abs;
-    while (*p == '/') {
-        p++;
-    }
-    while (*p) {
-        char name[128];
-        u32 l = 0;
+static int resolve_path_nofollow(const char *path, struct fs_node **out)
+{
+    char abs[256];
+    int r;
 
-        while (*p && *p != '/' && l < sizeof(name) - 1) {
-            name[l++] = *p++;
-        }
-        name[l] = 0;
-        while (*p == '/') {
-            p++;
-        }
-        if (!cur->finddir) {
-            return -ENOTDIR;
-        }
-        cur = cur->finddir(cur, name);
-        if (!cur) {
-            return -ENOENT;
-        }
+    if ((u32)path < 0x1000) {
+        return -EFAULT;
     }
-    *out = cur;
-    return 0;
+    r = path_absolute(path, abs, sizeof(abs));
+    if (r < 0) {
+        return r;
+    }
+    return vfs_resolve(abs, out, 0);
 }
 
 /* Split a path into parent directory + final component. */
@@ -167,7 +173,7 @@ static int split_path(const char *path, struct fs_node **dir,
     char *last = 0;
     int r;
 
-    r = path_normalize(path, abs, sizeof(abs));
+    r = path_absolute(path, abs, sizeof(abs));
     if (r < 0) {
         return r;
     }
@@ -290,13 +296,13 @@ static int sys_exec(struct trap_frame *frame)
     }
 
     // gather the argv strings while the old address space is still alive
-    char argv_buf[256];
-    u32 argv_off[8];
+    char argv_buf[2048];
+    u32 argv_off[34];
     u32 argc = 0;
     u32 str_bytes = 0;
     if ((u32)argv_user >= 0x1000) {
         u32 i;
-        for (i = 0; i < 8 && argv_user[i] != 0; i++) {
+        for (i = 0; i < 32 && argv_user[i] != 0; i++) {
             const char *s = argv_user[i];
             if ((u32)s < 0x1000) {
                 continue;
@@ -324,13 +330,13 @@ static int sys_exec(struct trap_frame *frame)
     }
 
     // gather envp strings too
-    char envp_buf[256];
-    u32 envp_off[16];
+    char envp_buf[2048];
+    u32 envp_off[32];
     u32 envc = 0;
     u32 env_bytes = 0;
     if ((u32)envp_user >= 0x1000) {
         u32 i;
-        for (i = 0; i < 16 && envp_user[i] != 0; i++) {
+        for (i = 0; i < 32 && envp_user[i] != 0; i++) {
             const char *s = envp_user[i];
             u32 len;
             if ((u32)s < 0x1000) {
@@ -353,19 +359,121 @@ static int sys_exec(struct trap_frame *frame)
         printk("exec: %s not found\n", name);
         return -1;
     }
+    {
+        char abs[256];
+        if (path_normalize(name, abs, sizeof(abs)) == 0 &&
+                vfs_noexec_path(abs)) {
+            return -EACCES;
+        }
+    }
+    if (!(node->mask & 0111)) {
+        return -EACCES;
+    }
 
     // header + program headers of a small statically linked program
     u8 *eh = (u8 *)kmalloc(512);
+    bzero(eh, 512);
     if (read_fs(node, 0, 512, eh) == 0) {
         kfree(eh);
         return -1;
+    }
+    if (eh[0] == '#' && eh[1] == '!') {
+        char interp[96], iarg[96];
+        char *p = (char *)eh + 2;
+        char *end = (char *)eh + 512;
+        char *nl = p;
+        u32 ilen = 0, alen = 0;
+        u32 old_off[32], old_argc = argc;
+        u32 tail_start, tail_len, prefix, idx = 0, pos = 0, i;
+
+        while (nl < end && *nl != '\n') {
+            nl++;
+        }
+        if (nl == end) {
+            kfree(eh);
+            return -ENOEXEC;
+        }
+        *nl = 0;
+        if (nl > p && nl[-1] == '\r') {
+            nl[-1] = 0;
+        }
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        while (p[ilen] && p[ilen] != ' ' && p[ilen] != '\t') {
+            ilen++;
+        }
+        if (ilen == 0 || ilen >= sizeof(interp)) {
+            kfree(eh);
+            return -ENOEXEC;
+        }
+        memcpy((u8 *)interp, (const u8 *)p, ilen);
+        interp[ilen] = 0;
+        p += ilen;
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        while (p[alen] && alen + 1 < sizeof(iarg)) {
+            alen++;
+        }
+        memcpy((u8 *)iarg, (const u8 *)p, alen);
+        iarg[alen] = 0;
+        while (alen && (iarg[alen - 1] == ' ' || iarg[alen - 1] == '\t')) {
+            iarg[--alen] = 0;
+        }
+
+        for (i = 0; i < old_argc; i++) {
+            old_off[i] = argv_off[i];
+        }
+        tail_start = old_argc > 1 ? old_off[1] : str_bytes;
+        tail_len = str_bytes - tail_start;
+        prefix = ilen + 1 + (alen ? alen + 1 : 0) +
+                 (u32)strlen(name) + 1;
+        if (prefix + tail_len > sizeof(argv_buf)) {
+            kfree(eh);
+            return -E2BIG;
+        }
+        for (i = tail_len; i > 0; i--) {
+            argv_buf[prefix + i - 1] = argv_buf[tail_start + i - 1];
+        }
+
+        argv_off[idx++] = pos;
+        memcpy((u8 *)argv_buf + pos, (const u8 *)interp, ilen + 1);
+        pos += ilen + 1;
+        if (alen) {
+            argv_off[idx++] = pos;
+            memcpy((u8 *)argv_buf + pos, (const u8 *)iarg, alen + 1);
+            pos += alen + 1;
+        }
+        argv_off[idx++] = pos;
+        ilen = (u32)strlen(name);
+        memcpy((u8 *)argv_buf + pos, (const u8 *)name, ilen + 1);
+        pos += ilen + 1;
+        for (i = 1; i < old_argc; i++) {
+            argv_off[idx++] = prefix + old_off[i] - tail_start;
+        }
+        argc = idx;
+        str_bytes = prefix + tail_len;
+        name = argv_buf;
+
+        kfree(eh);
+        if (resolve_path(name, &node) < 0 || !node ||
+                (node->flags & 0x7) != FS_FILE) {
+            return -ENOENT;
+        }
+        eh = (u8 *)kmalloc(512);
+        bzero(eh, 512);
+        if (read_fs(node, 0, 512, eh) == 0) {
+            kfree(eh);
+            return -EIO;
+        }
     }
     elf_header_t *elf = (elf_header_t *)eh;
     if (elf->magic != ELF_MAGIC ||
             elf->phentsize != sizeof(elf_section_header_t)) {
         printk("exec: %s is not a loadable ELF\n", name);
         kfree(eh);
-        return -1;
+        return -ENOEXEC;
     }
 
     struct mm_struct *mm = mm_create();
@@ -430,7 +538,7 @@ static int sys_exec(struct trap_frame *frame)
     u32 str_base = sp;
     u32 env_base = sp + str_bytes;
     u32 nwords = argc + envc + 3 + 12;  /* + auxv pairs */
-    u32 words[64];
+    u32 words[128];
     sp &= ~3u;
     sp -= 4 * nwords;
     words[0] = argc;
@@ -455,9 +563,7 @@ static int sys_exec(struct trap_frame *frame)
 
     u32 entry = elf->entry;
     u8 osabi = elf->elf[3];
-    // report while the old address space (holding `name`) is still alive,
-    // and adopt the program name as the task name
-    printk("exec %s: entry 0x%x (argc %d)\n", name, entry, argc);
+    // Adopt the program name while the old address space is still alive.
     {
         u32 k;
         for (k = 0; k < sizeof(current->name) - 1 && name[k]; k++) {
@@ -476,6 +582,12 @@ static int sys_exec(struct trap_frame *frame)
     current->mm = mm;
     current->mmap_base = MMAP_BASE;
     signal_exec(current);
+    for (i = 0; i < FD_MAX; i++) {
+        if (current->fds[i].used && (current->fds[i].flags & FD_CLOEXEC)) {
+            ofd_put(current->fds[i].ofd);
+            memset((u8 *)&current->fds[i], 0, sizeof(current->fds[i]));
+        }
+    }
     // the user heap starts right after the last segment
     current->brk = (brk_max + PAGE_SIZE - 1) & PAGE_MASK;
 
@@ -620,7 +732,7 @@ static int sys_waitpid(struct trap_frame *frame)
     if (pid == 0 || pid < -1) {
         return -ENOSYS;  // process groups are not supported yet
     }
-    if (options & ~(u32)WNOHANG) {
+    if (options & ~(u32)(WNOHANG | WUNTRACED | 8)) {
         return -EINVAL;
     }
 
@@ -788,7 +900,7 @@ static int sys_read(struct trap_frame *frame)
     return -EISDIR;  // directories are read with getdents()
 }
 
-// Write to the standard output/error; the filesystem is read-only.
+// Write to a tty, pipe, socket or regular file.
 static int sys_write(struct trap_frame *frame)
 {
     int fd = (int)frame->ebx;
@@ -823,7 +935,10 @@ static int sys_write(struct trap_frame *frame)
     if (f->kind == FD_FILE) {
         u32 off = f->ofd->offset;
         int n;
-        if (f->ofd->append) {
+        if (f->node->flags & FS_READONLY) {
+            return -EROFS;
+        }
+        if (f->ofd->append || (f->node->flags & FS_APPEND_ONLY)) {
             off = f->node->length;
         }
         if (f->ofd->path[0] && count) {
@@ -870,13 +985,27 @@ static int sys_open(struct trap_frame *frame)
     }
 
     if (base[0]) {
-        node = parent->finddir ? parent->finddir(parent, base) : 0;
+        if (flags & O_NOFOLLOW) {
+            r = resolve_path_nofollow(name, &node);
+        } else {
+            r = resolve_path(name, &node);
+        }
+        if (r < 0 && r != -ENOENT) {
+            return r;
+        }
+        if (node && (flags & O_NOFOLLOW) &&
+                (node->flags & 0x7) == FS_SYMLINK) {
+            return -ELOOP;
+        }
         if (!node) {
             if (!(flags & O_CREAT)) {
                 return -ENOENT;
             }
             if (!parent->create) {
                 return -EACCES;
+            }
+            if (parent->flags & FS_READONLY) {
+                return -EROFS;
             }
             node = create_fs(parent, base, 0);
             if (!node) {
@@ -906,12 +1035,18 @@ static int sys_open(struct trap_frame *frame)
             return -EROFS;
         }
         if ((flags & O_TRUNC) && acc != O_RDONLY) {
-            if (!created && path_normalize(name, abspath, sizeof(abspath)) == 0) {
-                jfs_log(JFS_TRUNCATE, abspath, 0, 0, 0, 0);
+            if (!created &&
+                    (node->flags & (FS_READONLY | FS_APPEND_ONLY))) {
+                return -EPERM;
             }
-            r = truncate_fs(node, 0);
-            if (r < 0) {
-                return r;
+            if (!created) {
+                if (path_normalize(name, abspath, sizeof(abspath)) == 0) {
+                    jfs_log(JFS_TRUNCATE, abspath, 0, 0, 0, 0);
+                }
+                r = truncate_fs(node, 0);
+                if (r < 0) {
+                    return r;
+                }
             }
         }
     }
@@ -938,7 +1073,7 @@ static int sys_open(struct trap_frame *frame)
     }
 
     current->fds[fd].used = 1;
-    current->fds[fd].flags = 0;
+    current->fds[fd].flags = (flags & O_CLOEXEC) ? FD_CLOEXEC : 0;
     current->fds[fd].kind =
         ((node->flags & 0x7) == FS_DIRECTORY) ? FD_DIR : FD_FILE;
     current->fds[fd].node = node;
@@ -973,7 +1108,8 @@ static int sys_lseek(struct trap_frame *frame)
             current->fds[fd].kind == FD_TTY_OUT) {
         return -ESPIPE;
     }
-    if (current->fds[fd].kind != FD_FILE) {
+    if (current->fds[fd].kind != FD_FILE &&
+            current->fds[fd].kind != FD_DIR) {
         return -EINVAL;
     }
 
@@ -1086,10 +1222,12 @@ static int sys_fcntl(struct trap_frame *frame)
 
     switch (cmd) {
     case F_DUPFD:
+    case F_DUPFD_CLOEXEC:
         for (newfd = (int)arg; newfd < FD_MAX; newfd++) {
             if (!current->fds[newfd].used) {
                 current->fds[newfd] = current->fds[fd];
-                current->fds[newfd].flags = 0;
+                current->fds[newfd].flags = cmd == F_DUPFD_CLOEXEC ?
+                    FD_CLOEXEC : 0;
                 ofd_get(current->fds[newfd].ofd);
                 return newfd;
             }
@@ -1103,13 +1241,14 @@ static int sys_fcntl(struct trap_frame *frame)
     case F_GETFL: {
         int fl = O_RDONLY;
         struct ofd *o = current->fds[fd].ofd;
-        if (current->fds[fd].kind == FD_PIPE && o->pipe_write) {
+        if (current->fds[fd].kind == FD_TTY_OUT ||
+                (current->fds[fd].kind == FD_PIPE && o && o->pipe_write)) {
             fl = O_WRONLY;
         }
-        if (o->append) {
+        if (o && o->append) {
             fl |= O_APPEND;
         }
-        if (o->nonblock) {
+        if (o && o->nonblock) {
             fl |= O_NONBLOCK;
         }
         return fl;
@@ -1165,10 +1304,10 @@ static int sys_pipe(struct trap_frame *frame)
     wo = ofd_alloc();
     if (!ro || !wo) {
         if (ro) {
-            kfree(ro);
+            ofd_put(ro);
         }
         if (wo) {
-            kfree(wo);
+            ofd_put(wo);
         }
         pipe_destroy(p);
         return -ENOMEM;
@@ -1192,6 +1331,16 @@ static int sys_pipe(struct trap_frame *frame)
     current->fds[wfd].flags = 0;
     current->fds[wfd].node = 0;
     current->fds[wfd].ofd = wo;
+    if (current->linux_abi) {
+        if (frame->ecx & O_NONBLOCK) {
+            ro->nonblock = 1;
+            wo->nonblock = 1;
+        }
+        if (frame->ecx & O_CLOEXEC) {
+            current->fds[rfd].flags = FD_CLOEXEC;
+            current->fds[wfd].flags = FD_CLOEXEC;
+        }
+    }
 
     ufds[0] = rfd;
     ufds[1] = wfd;
@@ -1332,8 +1481,15 @@ static int sys_access(struct trap_frame *frame)
     if ((mode & W_OK) && (node->flags & 0x7) == FS_FILE && !node->write) {
         return -EACCES;
     }
-    if ((mode & X_OK) && (node->flags & 0x7) != FS_DIRECTORY) {
-        return -EACCES;
+    if (mode & X_OK) {
+        char abs[256];
+        if ((node->flags & 0x7) != FS_DIRECTORY && !(node->mask & 0111)) {
+            return -EACCES;
+        }
+        if (path_normalize(path, abs, sizeof(abs)) == 0 &&
+                vfs_noexec_path(abs)) {
+            return -EACCES;
+        }
     }
     return 0;
 }
@@ -1499,6 +1655,12 @@ static int sys_ioctl(struct trap_frame *frame)
         return 0;
     }
     if (req == FIONBIO) {
+        if ((u32)arg < 0x1000) {
+            return -EFAULT;
+        }
+        if (f->ofd) {
+            f->ofd->nonblock = *(int *)arg != 0;
+        }
         return 0;
     }
     if (f->kind != FD_TTY_IN && f->kind != FD_TTY_OUT) {
@@ -2110,7 +2272,7 @@ static short poll_revents(struct file *f, short events)
 
     switch (f->kind) {
     case FD_TTY_IN:
-        if ((events & POLLIN) && kbd_haschar()) {
+        if ((events & POLLIN) && tty_input_ready(current->tty)) {
             r |= POLLIN;
         }
         if (events & POLLOUT) {
@@ -2509,6 +2671,9 @@ static int sys_mkdir(struct trap_frame *frame)
     }
     if (!parent->create) {
         return -EACCES;
+    }
+    if (parent->flags & FS_READONLY) {
+        return -EROFS;
     }
     if (finddir_fs(parent, base)) {
         return -EEXIST;
@@ -3199,6 +3364,7 @@ static int linux_statx(struct trap_frame *frame)
     u32 flags = frame->edx;
     u32 *stx = (u32 *)frame->edi;
     struct fs_node *node = 0;
+    struct file *f = 0;
     u32 mode, size, ino, now;
 
     if ((u32)stx < 0x1000) {
@@ -3209,17 +3375,18 @@ static int linux_statx(struct trap_frame *frame)
     }
     if (!*path) {
         if (dirfd < 0 || dirfd >= FD_MAX || !current->fds[dirfd].used) {
-            return -ENOENT;
+            return -EBADF;
         }
-        node = current->fds[dirfd].node;
+        f = &current->fds[dirfd];
+        node = f->node;
     } else if (dirfd == (int)LINUX_AT_FDCWD || path[0] == '/') {
         if (resolve_path(path, &node) < 0) {
             return -ENOENT;
         }
     } else {
         if (dirfd < 0 || dirfd >= FD_MAX || !current->fds[dirfd].used ||
-                !current->fds[dirfd].node->finddir ||
-                strchr(path, '/')) {
+                !current->fds[dirfd].node ||
+                !current->fds[dirfd].node->finddir || strchr(path, '/')) {
             return -ENOENT;
         }
         node = current->fds[dirfd].node->finddir(
@@ -3228,21 +3395,41 @@ static int linux_statx(struct trap_frame *frame)
             return -ENOENT;
         }
     }
-    if (!node) {
+    if (!node && !f) {
         return -ENOENT;
     }
     memset((u8 *)stx, 0, 256);
-    mode = ((node->flags & 0x7) == FS_DIRECTORY) ?
-        (S_IFDIR | (node->mask & 07777)) :
-        (S_IFREG | (node->mask & 07777));
-    size = node->length;
-    ino = node->inode;
+    if (node) {
+        mode = ((node->flags & 0x7) == FS_DIRECTORY) ?
+            (S_IFDIR | (node->mask & 07777)) :
+            (S_IFREG | (node->mask & 07777));
+        size = node->length;
+        ino = node->inode;
+    } else {
+        ino = 0;
+        size = 0;
+        switch (f->kind) {
+        case FD_TTY_IN:
+        case FD_TTY_OUT:
+            mode = S_IFCHR | 0600;
+            break;
+        case FD_PIPE:
+            mode = S_IFIFO | 0600;
+            size = pipe_count(f->ofd->pipe);
+            break;
+        case FD_SOCKET:
+            mode = S_IFSOCK | 0600;
+            break;
+        default:
+            return -EBADF;
+        }
+    }
     now = tick / TIMER_HZ;
     stx[0] = 0x7ff;              /* stx_mask */
     stx[1] = 512;                /* stx_blksize */
     stx[4] = 1;                  /* stx_nlink */
-    stx[5] = node->uid;
-    stx[6] = node->gid;
+    stx[5] = node ? node->uid : 0;
+    stx[6] = node ? node->gid : 0;
     *(u16 *)(stx + 7) = (u16)mode;
     stx[8] = ino; stx[9] = 0;    /* stx_ino */
     stx[10] = size; stx[11] = 0; /* stx_size */
@@ -3256,102 +3443,390 @@ static int linux_statx(struct trap_frame *frame)
     return 0;
 }
 
-static int linux_open_node(struct fs_node *node, u32 flags)
-{
-    struct ofd *o;
-    int fd;
-
-    if (!node) {
-        return -ENOENT;
-    }
-    if ((node->flags & 0x7) == FS_DIRECTORY) {
-        if ((flags & 3) != O_RDONLY) {
-            return -EISDIR;
-        }
-    } else if ((flags & 3) != O_RDONLY && !node->write) {
-        return -EROFS;
-    }
-    for (fd = 0; fd < FD_MAX; fd++) {
-        if (!current->fds[fd].used) {
-            break;
-        }
-    }
-    if (fd == FD_MAX) {
-        return -EMFILE;
-    }
-    o = ofd_alloc();
-    if (!o) {
-        return -ENOMEM;
-    }
-    o->append = (flags & O_APPEND) ? 1 : 0;
-    o->nonblock = (flags & O_NONBLOCK) ? 1 : 0;
-    current->fds[fd].used = 1;
-    current->fds[fd].flags = 0;
-    current->fds[fd].kind =
-        ((node->flags & 0x7) == FS_DIRECTORY) ? FD_DIR : FD_FILE;
-    current->fds[fd].node = node;
-    current->fds[fd].ofd = o;
-    return fd;
-}
+static int linux_abs_from_dir(int dirfd, const char *path, char *abs,
+                              u32 max);
 
 static int linux_openat(struct trap_frame *frame)
 {
-    int dirfd = (int)frame->ebx;
-    const char *path = (const char *)frame->ecx;
-    u32 flags = frame->edx;
-    u32 mode = frame->esi;
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ebx,
+                               (const char *)frame->ecx,
+                               abs, sizeof(abs));
+    if (r < 0) {
+        return r;
+    }
+    frame->ebx = (u32)abs;
+    frame->ecx = frame->edx;
+    frame->edx = frame->esi;
+    return sys_open(frame);
+}
 
+static int linux_pselect6(struct trap_frame *frame)
+{
+    int nfds = (int)frame->ebx;
+    u32 *rset = (u32 *)frame->ecx;
+    u32 *wset = (u32 *)frame->edx;
+    u32 *eset = (u32 *)frame->esi;
+    u32 *ts = (u32 *)frame->edi;
+    u32 *sigdata = (u32 *)frame->ebp;
+    u32 orig_r[2] = { 0, 0 }, orig_w[2] = { 0, 0 }, orig_e[2] = { 0, 0 };
+    u32 words, i, start = tick, timeout_ticks = 0;
+    u32 oldmask = current->blocked_sig;
+    int result;
+
+    if (nfds < 0 || nfds > FD_MAX) {
+        return -EINVAL;
+    }
+    words = ((u32)nfds + 31) / 32;
+    if ((words && rset && (u32)rset < 0x1000) ||
+            (words && wset && (u32)wset < 0x1000) ||
+            (words && eset && (u32)eset < 0x1000) ||
+            (ts && (u32)ts < 0x1000) ||
+            (sigdata && (u32)sigdata < 0x1000)) {
+        return -EFAULT;
+    }
+    if (sigdata) {
+        u32 *mask;
+        if (sigdata[1] != 8 || (u32)sigdata[0] < 0x1000) {
+            return -EINVAL;
+        }
+        mask = (u32 *)sigdata[0];
+        current->blocked_sig = *mask &
+            ~(1u << SIGKILL) & ~(1u << SIGSTOP);
+    }
+    for (i = 0; i < words; i++) {
+        if (rset) {
+            orig_r[i] = rset[i];
+            rset[i] = 0;
+        }
+        if (wset) {
+            orig_w[i] = wset[i];
+            wset[i] = 0;
+        }
+        if (eset) {
+            orig_e[i] = eset[i];
+            eset[i] = 0;
+        }
+    }
+    if (ts) {
+        u32 sec = ts[0], nsec = ts[1];
+        if (nsec >= 1000000000u) {
+            result = -EINVAL;
+            goto out;
+        }
+        if (sec > 0x7fffffffu / TIMER_HZ) {
+            timeout_ticks = 0xffffffffu;
+        } else {
+            timeout_ticks = sec * TIMER_HZ +
+                nsec / (1000000000u / TIMER_HZ);
+            if (nsec && timeout_ticks == 0) {
+                timeout_ticks = 1;
+            }
+        }
+    }
+
+    for (;;) {
+        int fd, ready = 0;
+        net_poll();
+        for (fd = 0; fd < nfds; fd++) {
+            u32 word = (u32)fd / 32;
+            u32 bit = 1u << (fd & 31);
+            int wr = rset && (orig_r[word] & bit);
+            int ww = wset && (orig_w[word] & bit);
+            int we = eset && (orig_e[word] & bit);
+            short events = (short)((wr ? POLLIN : 0) |
+                                   (ww ? POLLOUT : 0) |
+                                   (we ? POLLPRI : 0));
+            short rev;
+            if (!events) {
+                continue;
+            }
+            if (!current->fds[fd].used) {
+                result = -EBADF;
+                goto out;
+            }
+            rev = poll_revents(&current->fds[fd], events);
+            if (rev) {
+                if (wr) rset[word] |= bit;
+                if (ww) wset[word] |= bit;
+                if (we) eset[word] |= bit;
+                ready++;
+            }
+        }
+        if (ready) {
+            result = ready;
+            goto out;
+        }
+        if (ts && (timeout_ticks == 0 || tick - start >= timeout_ticks)) {
+            result = 0;
+            goto out;
+        }
+        if (current->pending_sig & ~current->blocked_sig) {
+            result = -EINTR;
+            goto out;
+        }
+        sti();
+        hlt();
+        cli();
+    }
+
+out:
+    if (sigdata) {
+        current->blocked_sig = oldmask;
+    }
+    return result;
+}
+
+static int linux_dup3(struct trap_frame *frame)
+{
+    u32 flags = frame->edx;
+    int r;
+    if (flags & ~(u32)O_CLOEXEC || frame->ebx == frame->ecx) {
+        return -EINVAL;
+    }
+    r = sys_dup2(frame);
+    if (r >= 0 && (flags & O_CLOEXEC)) {
+        current->fds[r].flags = FD_CLOEXEC;
+    }
+    return r;
+}
+
+static int linux_llseek(struct trap_frame *frame)
+{
+    u32 high = frame->ecx;
+    u32 low = frame->edx;
+    u32 *result = (u32 *)frame->esi;
+    int r;
+
+    if ((u32)result < 0x1000) {
+        return -EFAULT;
+    }
+    if ((high != 0 && high != 0xffffffffu) ||
+            (high == 0 && low > 0x7fffffffu) ||
+            (high == 0xffffffffu && low < 0x80000000u)) {
+        return -EOVERFLOW;
+    }
+    frame->ecx = low;
+    frame->edx = frame->edi;
+    r = sys_lseek(frame);
+    if (r < 0) {
+        return r;
+    }
+    result[0] = (u32)r;
+    result[1] = 0;
+    return 0;
+}
+
+static int linux_faccessat(struct trap_frame *frame)
+{
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ebx,
+                               (const char *)frame->ecx,
+                               abs, sizeof(abs));
+    if (r < 0) {
+        return r;
+    }
+    frame->ebx = (u32)abs;
+    frame->ecx = frame->edx;
+    return sys_access(frame);
+}
+
+static int linux_readlink_path(const char *path, u8 *buf, u32 count)
+{
+    struct fs_node *node;
+    int r;
+
+    if ((u32)buf < 0x1000) {
+        return -EFAULT;
+    }
+    r = resolve_path_nofollow(path, &node);
+    if (r < 0) {
+        return r;
+    }
+    if ((node->flags & 0x7) != FS_SYMLINK) {
+        return -EINVAL;
+    }
+    return (int)read_fs(node, 0, count, buf);
+}
+
+static int linux_readlinkat(struct trap_frame *frame)
+{
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ebx,
+                               (const char *)frame->ecx,
+                               abs, sizeof(abs));
+    if (r < 0) return r;
+    return linux_readlink_path(abs, (u8 *)frame->edx, frame->esi);
+}
+
+static int linux_symlink_path(const char *path, const char *target)
+{
+    char abs[256];
+    int r;
+
+    if ((u32)target < 0x1000) {
+        return -EFAULT;
+    }
+    r = path_absolute(path, abs, sizeof(abs));
+    if (r < 0) return r;
+    r = vfs_symlink(abs, target);
+    if (r < 0) return r;
+    jfs_log(JFS_SYMLINK, abs, 0, 0777, (const u8 *)target,
+            (u32)strlen(target));
+    return 0;
+}
+
+static int linux_symlinkat(struct trap_frame *frame)
+{
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ecx,
+                               (const char *)frame->edx,
+                               abs, sizeof(abs));
+    if (r < 0) return r;
+    return linux_symlink_path(abs, (const char *)frame->ebx);
+}
+
+static int linux_prctl(struct trap_frame *frame)
+{
+    u32 option = frame->ebx;
+    char *name = (char *)frame->ecx;
+
+    if (option == 15) {
+        if ((u32)name < 0x1000) {
+            return -EFAULT;
+        }
+        copy_string(current->name, name, sizeof(current->name));
+        return 0;
+    }
+    if (option == 16) {
+        if ((u32)name < 0x1000) {
+            return -EFAULT;
+        }
+        copy_string(name, current->name, sizeof(current->name));
+        return 0;
+    }
+    if (option == 35) {
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static int linux_utimes(struct trap_frame *frame)
+{
+    frame->ecx = F_OK;
+    return sys_access(frame);
+}
+
+static int linux_utimensat(struct trap_frame *frame)
+{
+    const char *path = (const char *)frame->ecx;
+    char abs[160];
+    int r;
+
+    if (!path || !*path) {
+        int fd = (int)frame->ebx;
+        if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) {
+            return -EBADF;
+        }
+        return 0;
+    }
     if ((u32)path < 0x1000) {
         return -EFAULT;
     }
-    if (dirfd == (int)LINUX_AT_FDCWD || path[0] == '/') {
-        frame->ebx = (u32)path;
-        frame->ecx = flags;
-        frame->edx = mode;
-        return sys_open(frame);
+    r = linux_abs_from_dir((int)frame->ebx, path, abs, sizeof(abs));
+    if (r < 0) {
+        return r;
     }
-    {
-        struct fs_node *node;
-        const char *p = path;
-
-        if (dirfd < 0 || dirfd >= FD_MAX || !current->fds[dirfd].used) {
-            return -EBADF;
-        }
-        node = current->fds[dirfd].node;
-        while (*p) {
-            char name[128];
-            u32 l = 0;
-
-            while (*p == '/') {
-                p++;
-            }
-            if (!*p) {
-                break;
-            }
-            while (*p && *p != '/' && l < sizeof(name) - 1) {
-                name[l++] = *p++;
-            }
-            name[l] = 0;
-            if (!strcmp(name, ".")) {
-                continue;
-            }
-            if (!strcmp(name, "..")) {
-                node = fs_root;
-                continue;
-            }
-            if (!node || !node->finddir) {
-                return -ENOTDIR;
-            }
-            node = node->finddir(node, name);
-            if (!node) {
-                return -ENOENT;
-            }
-        }
-        return linux_open_node(node, flags);
-    }
+    frame->ebx = (u32)abs;
+    frame->ecx = F_OK;
+    return sys_access(frame);
 }
 
-static int tty_canon_read(struct tty *t, u8 *buf, u32 count);
+static int linux_sysinfo(struct trap_frame *frame)
+{
+    u32 *info = (u32 *)frame->ebx;
+    if ((u32)info < 0x1000) {
+        return -EFAULT;
+    }
+    memset((u8 *)info, 0, 64);
+    info[0] = tick / TIMER_HZ;
+    info[4] = MEMORY_SIZE;
+    info[5] = MEMORY_SIZE;
+    info[13] = 1;
+    return 0;
+}
+
+static int linux_sched_getaffinity(struct trap_frame *frame)
+{
+    u32 size = frame->ecx;
+    u8 *mask = (u8 *)frame->edx;
+    if (size < sizeof(u32) || (u32)mask < 0x1000) {
+        return size < sizeof(u32) ? -EINVAL : -EFAULT;
+    }
+    memset(mask, 0, size);
+    *(u32 *)mask = 1;
+    return 0;
+}
+
+static int linux_times(struct trap_frame *frame)
+{
+    u32 *tms = (u32 *)frame->ebx;
+    if (tms) {
+        if ((u32)tms < 0x1000) {
+            return -EFAULT;
+        }
+        memset((u8 *)tms, 0, 16);
+    }
+    return (int)tick;
+}
+
+static int linux_getrusage(struct trap_frame *frame)
+{
+    u32 *usage = (u32 *)frame->ecx;
+    if ((u32)usage < 0x1000) {
+        return -EFAULT;
+    }
+    memset((u8 *)usage, 0, 72);
+    return 0;
+}
+
+static int linux_getrlimit(struct trap_frame *frame)
+{
+    u32 *old = (u32 *)frame->ecx;
+    u32 val = frame->ebx == 7 ? 16 : 64u * 1024u * 1024u;
+    if ((u32)old < 0x1000) {
+        return -EFAULT;
+    }
+    old[0] = val;
+    old[1] = val;
+    return 0;
+}
+
+static int linux_getgroups(struct trap_frame *frame)
+{
+    int size = (int)frame->ebx;
+    u32 *groups = (u32 *)frame->ecx;
+    if (size == 0) {
+        return 1;
+    }
+    if (size < 0 || (u32)groups < 0x1000) {
+        return -EINVAL;
+    }
+    groups[0] = 0;
+    return 1;
+}
+
+static int linux_fsync(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) {
+        return -EBADF;
+    }
+    hd_flush();
+    return 0;
+}
+
+static int tty_read(struct tty *t, u8 *buf, u32 count);
 static int linux_abs_from_dir(int dirfd, const char *path, char *abs,
                               u32 max);
 static int linux_mkdirat(struct trap_frame *frame);
@@ -3371,7 +3846,7 @@ static int linux_dispatch(struct trap_frame *frame)
         if (fd >= 0 && fd < FD_MAX && current->fds[fd].used &&
                 current->fds[fd].kind == FD_TTY_IN &&
                 (u32)frame->ecx >= 0x1000) {
-            return tty_canon_read(current->tty, (u8 *)frame->ecx,
+            return tty_read(current->tty, (u8 *)frame->ecx,
                                   frame->edx);
         }
         return sys_read(frame);
@@ -3388,6 +3863,9 @@ static int linux_dispatch(struct trap_frame *frame)
     case 24: case 47: case 49: case 50: return 0;
     case 15: return sys_chmod(frame);
     case 94: return sys_fchmod(frame);
+    case 308: return linux_pselect6(frame);
+    case 330: return linux_dup3(frame);
+    case 331: return sys_pipe(frame);
     case 306: {
         char abs[160];
         int r = linux_abs_from_dir((int)frame->ebx,
@@ -3409,29 +3887,46 @@ static int linux_dispatch(struct trap_frame *frame)
     case 41: return sys_dup(frame);
     case 42: return sys_pipe(frame);
     case 45: return sys_brk(frame);
+    case 30: case 271: return linux_utimes(frame);
+    case 36: hd_flush(); return 0;
+    case 43: return linux_times(frame);
     case 54: return sys_ioctl(frame);
     case 57: return sys_setpgid(frame);
     case 65: return sys_getpgrp(frame);
     case 66: return sys_setsid(frame);
     case 55: return sys_fcntl(frame);
     case 60: return 0;          /* umask */
+    case 75: return 0;          /* setrlimit */
+    case 76: return linux_getrlimit(frame);
+    case 77: return linux_getrusage(frame);
+    case 80: case 205: return linux_getgroups(frame);
+    case 81: case 206: return 0;
     case 63: return sys_dup2(frame);
     case 64: return sys_getppid(frame);
     case 78: return sys_gettimeofday(frame);
     case 91: return sys_munmap(frame);
+    case 83: return linux_symlink_path((const char *)frame->ecx,
+                                       (const char *)frame->ebx);
+    case 85: return linux_readlink_path((const char *)frame->ebx,
+                                        (u8 *)frame->ecx, frame->edx);
     case 92: return sys_truncate(frame);
     case 93: return sys_ftruncate(frame);
     case 114: return sys_waitpid(frame);
+    case 116: return linux_sysinfo(frame);
+    case 118: case 148: case 344: return linux_fsync(frame);
     case 120: return frame->ecx == 0 ? sys_fork(frame) : -ENOSYS;
     case 119: return signal_sigreturn_linux(frame, 0);
     case 122: return sys_uname(frame);
     case 125: return sys_mprotect(frame);
     case 132: return sys_getpgid(frame);
     case 133: return linux_fchdir(frame);
+    case 140: return linux_llseek(frame);
     case 145: return linux_readv(frame);
     case 146: return linux_writev(frame);
+    case 158: current->time_slice = 0; return 0;
     case 162: return sys_nanosleep(frame);
     case 168: return sys_poll(frame);
+    case 172: return linux_prctl(frame);
     case 173: return signal_sigreturn_linux(frame, 1);
     case 174: return linux_sigaction(frame);
     case 175: return sys_sigprocmask(frame);
@@ -3457,9 +3952,12 @@ static int linux_dispatch(struct trap_frame *frame)
     case 220: return linux_getdents64(frame);
     case 221: return sys_fcntl(frame);
     case 296: return linux_mkdirat(frame);
+    case 299: case 320: return linux_utimensat(frame);
     case 301: return linux_unlinkat(frame);
     case 302: return linux_renameat(frame);
+    case 307: case 439: return linux_faccessat(frame);
     case 224: return (int)current->pid;
+    case 242: return linux_sched_getaffinity(frame);
     case 240: {
         u32 op = frame->ebx & 0x7f;
         u32 oe = frame->ebx;
@@ -3473,14 +3971,20 @@ static int linux_dispatch(struct trap_frame *frame)
     case 258: return (int)current->pid;
     case 265: return linux_clock_gettime(frame, 0);
     case 270: return signal_kill((int)frame->ebx, (int)frame->edx);
+    case 272: return 0;          /* fadvise64_64: advice is optional */
     case 295: return linux_openat(frame);
-    case 305: return -ENOENT;   /* no procfs/symlinks */
+    case 304: return linux_symlinkat(frame);
+    case 305: return linux_readlinkat(frame);
     case 311: return 0;
     case 340: return linux_prlimit64(frame);
+    case 353: return frame->edi == 0 ? linux_renameat(frame) : -EINVAL;
     case 383: return linux_statx(frame);
     case 355: return linux_getrandom(frame);
     case 403: return linux_clock_gettime(frame, 1);
     default:
+#ifdef DEBUG_E9
+        printk("linux syscall %d: ENOSYS\n", nr);
+#endif
         return -ENOSYS;
     }
 }
@@ -3572,10 +4076,39 @@ static int linux_fchdir(struct trap_frame *frame)
     return 0;
 }
 
-static int tty_canon_read(struct tty *t, u8 *buf, u32 count)
+static int tty_read(struct tty *t, u8 *buf, u32 count)
 {
     if (!t || !buf || !count) {
         return -EINVAL;
+    }
+    if (!(t->termios.c_lflag & ICANON) && t->in_pos >= t->in_len) {
+        u32 n = 0;
+        u32 vmin = t->termios.c_cc[VMIN];
+        while (n < count) {
+            int c = kbd_getchar();
+            if (c < 0) {
+                if (n > 0 || vmin == 0) {
+                    break;
+                }
+                sti();
+                while ((c = kbd_getchar()) < 0) {
+                    hlt();
+                }
+                cli();
+            }
+            if (c == '\r' && (t->termios.c_iflag & ICRNL)) {
+                c = '\n';
+            }
+            if ((t->termios.c_lflag & ECHO) && (c == '\n' || c >= ' ')) {
+                char ch = (char)c;
+                display_write(t, &ch, 1);
+            }
+            buf[n++] = (u8)c;
+            if (n >= vmin && !kbd_haschar()) {
+                break;
+            }
+        }
+        return (int)n;
     }
     if (t->in_pos >= t->in_len) {
         t->in_len = 0;
@@ -3592,7 +4125,17 @@ static int tty_canon_read(struct tty *t, u8 *buf, u32 count)
             if (c == '\r') {
                 c = '\n';
             }
-            if (c == '\b' || c == 0x7f) {
+            if (c == t->termios.c_cc[VEOF]) {
+                break;
+            }
+            if (c == t->termios.c_cc[VKILL]) {
+                while (t->in_len > 0) {
+                    t->in_len--;
+                    display_write(t, "\b \b", 3);
+                }
+                continue;
+            }
+            if (c == t->termios.c_cc[VERASE] || c == '\b' || c == 0x7f) {
                 if (t->in_len > 0) {
                     t->in_len--;
                     display_write(t, "\b \b", 3);

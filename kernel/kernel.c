@@ -49,6 +49,7 @@ void kernel_start(void)
         fs_root = init_vfs();
     }
     jfs_init();
+    vfs_apply_policies();
 
     // initialises system call
     init_syscall();
