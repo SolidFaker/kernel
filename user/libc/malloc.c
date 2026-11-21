@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <arch/user.h>
 
 struct blk {
     size_t size;
@@ -15,18 +16,14 @@ static volatile int heap_lock;
 static void lock_heap(void)
 {
     while (__sync_lock_test_and_set(&heap_lock, 1)) {
-        __asm__ volatile("int $0x80"
-                         : : "a" (NR_futex), "b" (0),
-                             "c" (&heap_lock), "d" (1) : "memory");
+        arch_syscall4(NR_futex, 0, (uaddr)&heap_lock, 1, 0);
     }
 }
 
 static void unlock_heap(void)
 {
     __sync_lock_release(&heap_lock);
-    __asm__ volatile("int $0x80"
-                     : : "a" (NR_futex), "b" (1),
-                         "c" (&heap_lock), "d" (1) : "memory");
+    arch_syscall4(NR_futex, 1, (uaddr)&heap_lock, 1, 0);
 }
 
 static size_t align_up(size_t n)

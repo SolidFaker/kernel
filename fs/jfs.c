@@ -191,6 +191,13 @@ static void jfs_apply(struct jfs_rec *r, u8 *data)
             node->mask = r->offset & 07777;
         }
         break;
+    case JFS_CHOWN:
+        node = lookup_path(r->path);
+        if (node) {
+            node->uid = r->offset & 0xffff;
+            node->gid = (r->offset >> 16) & 0xffff;
+        }
+        break;
     case JFS_SYMLINK:
         if (lookup_path(r->path)) {
             return;
@@ -266,6 +273,15 @@ static int jfs_emit(u32 base, u32 *hp, u32 *sp, u32 type,
 
     *hp += sectors;
     (*sp)++;
+    if (type == JFS_CREATE_FILE || type == JFS_CREATE_DIR ||
+            type == JFS_SYMLINK) {
+        struct fs_node *node = lookup_path(path);
+        if (node && (node->uid || node->gid)) {
+            return jfs_emit(base, hp, sp, JFS_CHOWN, path, 0,
+                            (node->uid & 0xffff) |
+                            ((node->gid & 0xffff) << 16), 0, 0);
+        }
+    }
     return 0;
 }
 

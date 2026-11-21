@@ -5,6 +5,7 @@
 #include "drivers/timer.h"
 #include "drivers/tty.h"
 #include "drivers/hd.h"
+#include "arch/user.h"
 #include "elf.h"
 #include "errno.h"
 #include "fs.h"
@@ -24,14 +25,35 @@
 #include "socket.h"
 #include "net.h"
 #include "drivers/graphic.h"
+#if __SIZEOF_POINTER__ == 8
+#include "arch/stat.h"
+#endif
+
+#ifndef ARCH_NAME
+#define ARCH_NAME "i686"
+#endif
 
 typedef int (*sysc_func) (struct trap_frame *r);
 
-static void syscall_handler(struct trap_frame *frame);
+void syscall_handler(struct trap_frame *frame);
 static void copy_string(char *dst, const char *src, u32 max);
 
 
 static sysc_func syscalls[SYSCALL_NUM];
+static int sys_getuid(struct trap_frame *frame);
+static int sys_geteuid(struct trap_frame *frame);
+static int sys_getgid(struct trap_frame *frame);
+static int sys_getegid(struct trap_frame *frame);
+static int sys_setuid(struct trap_frame *frame);
+static int sys_setgid(struct trap_frame *frame);
+static int sys_seteuid(struct trap_frame *frame);
+static int sys_setegid(struct trap_frame *frame);
+static int sys_getgroups(struct trap_frame *frame);
+static int sys_setgroups(struct trap_frame *frame);
+static int sys_chown(struct trap_frame *frame);
+static int sys_fchown(struct trap_frame *frame);
+static int sys_setresuid(struct trap_frame *frame);
+static int sys_setresgid(struct trap_frame *frame);
 
 /* ------------------------------------------------------------------ */
 /* POSIX path handling                                                */
@@ -44,7 +66,7 @@ static int path_normalize(const char *path, char *out, u32 out_size)
     char *comp[32];
     u32 i = 0, ncomp = 0, j;
     char *p;
-    u32 len = (u32)strlen(path);
+    u32 len = (uaddr)strlen(path);
 
     if (path[0] != '/') {
         const char *c = current->cwd;
@@ -104,7 +126,7 @@ static int path_normalize(const char *path, char *out, u32 out_size)
         return 0;
     }
     for (j = 0; j < ncomp; j++) {
-        u32 l = (u32)strlen(comp[j]);
+        u32 l = (uaddr)strlen(comp[j]);
         if (i + l + 2 > out_size) {
             return -ERANGE;
         }
@@ -118,14 +140,14 @@ static int path_normalize(const char *path, char *out, u32 out_size)
 
 static int path_absolute(const char *path, char *out, u32 out_size)
 {
-    u32 len = (u32)strlen(path);
+    u32 len = (uaddr)strlen(path);
     if (path[0] == '/') {
         if (len + 1 > out_size) return -ERANGE;
         memcpy((u8 *)out, (const u8 *)path, len + 1);
         return 0;
     }
     {
-        u32 cwd_len = (u32)strlen(current->cwd);
+        u32 cwd_len = (uaddr)strlen(current->cwd);
         if (cwd_len + len + 2 > out_size) return -ERANGE;
         memcpy((u8 *)out, (const u8 *)current->cwd, cwd_len);
         out[cwd_len] = '/';
@@ -139,7 +161,7 @@ static int resolve_path(const char *path, struct fs_node **out)
     char abs[256];
     int r;
 
-    if ((u32)path < 0x1000) {
+    if ((uaddr)path < 0x1000) {
         return -EFAULT;
     }
     r = path_absolute(path, abs, sizeof(abs));
@@ -154,7 +176,7 @@ static int resolve_path_nofollow(const char *path, struct fs_node **out)
     char abs[256];
     int r;
 
-    if ((u32)path < 0x1000) {
+    if ((uaddr)path < 0x1000) {
         return -EFAULT;
     }
     r = path_absolute(path, abs, sizeof(abs));
@@ -190,7 +212,7 @@ static int split_path(const char *path, struct fs_node **dir,
         }
         return -EINVAL;
     }
-    if ((u32)strlen(last + 1) + 1 > name_size) {
+    if ((uaddr)strlen(last + 1) + 1 > name_size) {
         return -ERANGE;
     }
     {
@@ -237,48 +259,23 @@ static void fill_stat(struct stat *st, struct fs_node *node)
 
 int fork()
 {
-    int a;
-    asm volatile("int $0x80" : "=a" (a) : "0" (1));
-    return a;
+    return (int)arch_syscall0(NR_fork);
 }
 
 int execve(const char *path, char *const argv[], char *const envp[])
 {
-    int a;
-    asm volatile("int $0x80" : "=a" (a)
-                 : "0" (NR_exec), "b" (path), "c" (argv), "d" (envp)
-                 : "memory");
-    return a;
+    return (int)arch_syscall3(NR_exec, (uaddr)path, (uaddr)argv,
+                              (uaddr)envp);
 }
 
 void exit(int status)
 {
-    asm volatile("int $0x80" : : "a" (NR_exit), "b" (status) : "memory");
+    arch_syscall1(NR_exit, (uaddr)status);
 }
 
 int print_str(const char *str)
 {
-    int a;
-    asm volatile("int $0x80" : "=a" (a) : "0" (0), "b"(str));
-    return a;
-}
-
-// Write len bytes to a user virtual address of an mm being built (not
-// yet loaded into CR3), through the physical memory alias.
-static void copy_to_userva(struct mm_struct *mm, u32 va, const u8 *src, u32 len)
-{
-    u32 done = 0;
-    while (done < len) {
-        u32 pa;
-        get_mapping(mm->pdt, va + done, &pa);
-        u8 *dst = (u8 *)(pa + PAGE_OFFSET + ((va + done) & ~PAGE_MASK));
-        u32 chunk = PAGE_SIZE - ((va + done) & ~PAGE_MASK);
-        if (chunk > len - done) {
-            chunk = len - done;
-        }
-        memcpy(dst, src + done, chunk);
-        done += chunk;
-    }
+    return (int)arch_syscall1(NR_print, (uaddr)str);
 }
 
 // Load the ELF program stored in `name` into a fresh address space and
@@ -291,7 +288,7 @@ static int sys_exec(struct trap_frame *frame)
     const char *name = (const char *)frame->ebx;
     char **argv_user = (char **)(frame->ecx);
     char **envp_user = (char **)(frame->edx);
-    if ((u32)name < 0x1000) {
+    if ((uaddr)name < 0x1000) {
         return -1;
     }
 
@@ -300,14 +297,14 @@ static int sys_exec(struct trap_frame *frame)
     u32 argv_off[34];
     u32 argc = 0;
     u32 str_bytes = 0;
-    if ((u32)argv_user >= 0x1000) {
+    if ((uaddr)argv_user >= 0x1000) {
         u32 i;
         for (i = 0; i < 32 && argv_user[i] != 0; i++) {
             const char *s = argv_user[i];
-            if ((u32)s < 0x1000) {
+            if ((uaddr)s < 0x1000) {
                 continue;
             }
-            u32 len = (u32)strlen(s);
+            u32 len = (uaddr)strlen(s);
             if (str_bytes + len + 1 > sizeof(argv_buf)) {
                 break;
             }
@@ -318,7 +315,7 @@ static int sys_exec(struct trap_frame *frame)
         }
     }
     if (argc == 0) {
-        u32 len = (u32)strlen(name);
+        u32 len = (uaddr)strlen(name);
         if (len > sizeof(argv_buf) - 1) {
             len = sizeof(argv_buf) - 1;
         }
@@ -334,15 +331,15 @@ static int sys_exec(struct trap_frame *frame)
     u32 envp_off[32];
     u32 envc = 0;
     u32 env_bytes = 0;
-    if ((u32)envp_user >= 0x1000) {
+    if ((uaddr)envp_user >= 0x1000) {
         u32 i;
         for (i = 0; i < 32 && envp_user[i] != 0; i++) {
             const char *s = envp_user[i];
             u32 len;
-            if ((u32)s < 0x1000) {
+            if ((uaddr)s < 0x1000) {
                 continue;
             }
-            len = (u32)strlen(s);
+            len = (uaddr)strlen(s);
             if (env_bytes + len + 1 > sizeof(envp_buf)) {
                 break;
             }
@@ -366,14 +363,14 @@ static int sys_exec(struct trap_frame *frame)
             return -EACCES;
         }
     }
-    if (!(node->mask & 0111)) {
+    if (fs_permission(node, X_OK) < 0) {
         return -EACCES;
     }
 
     // header + program headers of a small statically linked program
-    u8 *eh = (u8 *)kmalloc(512);
-    bzero(eh, 512);
-    if (read_fs(node, 0, 512, eh) == 0) {
+    u8 *eh = (u8 *)kmalloc(2048);
+    bzero(eh, 2048);
+    if (read_fs(node, 0, 2048, eh) == 0) {
         kfree(eh);
         return -1;
     }
@@ -428,7 +425,7 @@ static int sys_exec(struct trap_frame *frame)
         tail_start = old_argc > 1 ? old_off[1] : str_bytes;
         tail_len = str_bytes - tail_start;
         prefix = ilen + 1 + (alen ? alen + 1 : 0) +
-                 (u32)strlen(name) + 1;
+                 (uaddr)strlen(name) + 1;
         if (prefix + tail_len > sizeof(argv_buf)) {
             kfree(eh);
             return -E2BIG;
@@ -446,7 +443,7 @@ static int sys_exec(struct trap_frame *frame)
             pos += alen + 1;
         }
         argv_off[idx++] = pos;
-        ilen = (u32)strlen(name);
+        ilen = (uaddr)strlen(name);
         memcpy((u8 *)argv_buf + pos, (const u8 *)name, ilen + 1);
         pos += ilen + 1;
         for (i = 1; i < old_argc; i++) {
@@ -461,16 +458,20 @@ static int sys_exec(struct trap_frame *frame)
                 (node->flags & 0x7) != FS_FILE) {
             return -ENOENT;
         }
-        eh = (u8 *)kmalloc(512);
-        bzero(eh, 512);
-        if (read_fs(node, 0, 512, eh) == 0) {
+        eh = (u8 *)kmalloc(2048);
+        bzero(eh, 2048);
+        if (read_fs(node, 0, 2048, eh) == 0) {
             kfree(eh);
             return -EIO;
         }
     }
     elf_header_t *elf = (elf_header_t *)eh;
+    elf64_header_t *elf64 = (elf64_header_t *)eh;
+    u8 elf_class = eh[4];
     if (elf->magic != ELF_MAGIC ||
-            elf->phentsize != sizeof(elf_section_header_t)) {
+            (elf_class != 1 && elf_class != 2) ||
+            (elf_class == 1 && elf->phentsize != sizeof(elf_section_header_t)) ||
+            (elf_class == 2 && elf64->phentsize != sizeof(elf64_program_header_t))) {
         printk("exec: %s is not a loadable ELF\n", name);
         kfree(eh);
         return -ENOEXEC;
@@ -480,67 +481,63 @@ static int sys_exec(struct trap_frame *frame)
 
     // map + fill every PT_LOAD segment; track the heap start
     u32 i;
-    u32 brk_max = 0;
-    elf_section_header_t *ph = (elf_section_header_t *)(eh + elf->phoff);
-    for (i = 0; i < elf->phnum; i++, ph++) {
-        if (ph->type != ELF_PROG_LOAD) {
-            continue;
+    uaddr brk_max = 0;
+    u32 phnum = elf_class == 1 ? elf->phnum : elf64->phnum;
+    uaddr phoff = elf_class == 1 ? elf->phoff : elf64->phoff;
+    elf_section_header_t *ph = (elf_section_header_t *)(eh + phoff);
+    elf64_program_header_t *ph64 = (elf64_program_header_t *)(eh + phoff);
+    if (phoff + phnum * (elf_class == 1 ? sizeof(*ph) : sizeof(*ph64)) > 2048) {
+        kfree(eh);
+        return -ENOEXEC;
+    }
+    for (i = 0; i < phnum; i++, ph++, ph64++) {
+        uaddr segva, memsz;
+        if (elf_class == 1) {
+            if (ph->type != ELF_PROG_LOAD) continue;
+            segva = ph->vaddr;
+            memsz = ph->memsz;
+        } else {
+            if (ph64->type != ELF_PROG_LOAD) continue;
+            segva = ph64->vaddr;
+            memsz = ph64->memsz;
         }
-        u32 seg_start = ph->vaddr & PAGE_MASK;
-        u32 seg_end = ph->vaddr + ph->memsz;
+        uaddr seg_start = segva & PAGE_MASK;
+        uaddr seg_end = segva + memsz;
         if (seg_end > brk_max) {
             brk_max = seg_end;
         }
-        u32 va;
+        uaddr va;
 
         // freshly allocated pages hold garbage: zero them via the
         // physical memory alias before copying anything in
         for (va = seg_start; va < seg_end; va += PAGE_SIZE) {
-            u32 pa;
+            uaddr pa;
             if (!get_mapping(mm->pdt, va, &pa)) {
                 pa = page_alloc();
                 map(mm->pdt, va, pa, PG_PRESENT | PG_WRITE | PG_USER);
             }
             bzero((u8 *)(pa + PAGE_OFFSET), PAGE_SIZE);
         }
-        // file contents (bss is the zeroed tail of the last page)
-        u32 done = 0;
-        while (done < ph->filesz) {
-            va = ph->vaddr + done;
-            u32 pa;
-            get_mapping(mm->pdt, va, &pa);
-            u8 *dst = (u8 *)(pa + PAGE_OFFSET + (va & ~PAGE_MASK));
-            u32 chunk = PAGE_SIZE - (va & ~PAGE_MASK);
-            if (chunk > ph->filesz - done) {
-                chunk = ph->filesz - done;
-            }
-            read_fs(node, ph->off + done, chunk, dst);
-            done += chunk;
-        }
     }
 
     // user stack
-    u32 stack_top = USER_STACK_VA_TOP;
-    u32 va;
+    uaddr stack_top = USER_STACK_VA_TOP;
+    uaddr va;
     for (va = stack_top - USER_STACK_PAGES * PAGE_SIZE; va < stack_top;
             va += PAGE_SIZE) {
-        u32 pa = page_alloc();
+        uaddr pa = page_alloc();
         map(mm->pdt, va, pa, PG_PRESENT | PG_WRITE | PG_USER);
         bzero((u8 *)(pa + PAGE_OFFSET), PAGE_SIZE);
     }
 
     // build the initial stack: [argc][argv...][NULL][envp...][NULL]
-    u32 sp = stack_top - (str_bytes + env_bytes);
-    copy_to_userva(mm, sp, (const u8 *)argv_buf, str_bytes);
-    if (env_bytes) {
-        copy_to_userva(mm, sp + str_bytes, (const u8 *)envp_buf, env_bytes);
-    }
-    u32 str_base = sp;
-    u32 env_base = sp + str_bytes;
+    uaddr sp = stack_top - (str_bytes + env_bytes);
+    uaddr str_base = sp;
+    uaddr env_base = sp + str_bytes;
     u32 nwords = argc + envc + 3 + 12;  /* + auxv pairs */
-    u32 words[128];
-    sp &= ~3u;
-    sp -= 4 * nwords;
+    uaddr words[128];
+    sp = (sp - sizeof(reg_t) * nwords) &
+         ~(uaddr)(2 * sizeof(reg_t) - 1);
     words[0] = argc;
     for (i = 0; i < argc; i++) {
         words[1 + i] = str_base + argv_off[i];
@@ -559,9 +556,8 @@ static int sys_exec(struct trap_frame *frame)
         words[ai++] = 14; words[ai++] = 0;          /* AT_EGID */
         words[ai++] = 0; words[ai++] = 0;           /* AT_NULL */
     }
-    copy_to_userva(mm, sp, (const u8 *)words, 4 * nwords);
 
-    u32 entry = elf->entry;
+    uaddr entry = elf_class == 1 ? elf->entry : elf64->entry;
     u8 osabi = elf->elf[3];
     // Adopt the program name while the old address space is still alive.
     {
@@ -571,8 +567,6 @@ static int sys_exec(struct trap_frame *frame)
         }
         current->name[k] = '\0';
     }
-    kfree(eh);
-
     // commit: replace the old address space, then rewrite the trap
     // frame so int_ret_stub drops the task into the new program
     switch_pdt(mm->pdt_phys);
@@ -580,6 +574,23 @@ static int sys_exec(struct trap_frame *frame)
         mm_destroy(current->mm);
     }
     current->mm = mm;
+    current->tls = 0;
+    arch_set_tls_entry(current->tls_entry, 0);
+    ph = (elf_section_header_t *)(eh + phoff);
+    ph64 = (elf64_program_header_t *)(eh + phoff);
+    for (i = 0; i < phnum; i++, ph++, ph64++) {
+        if (elf_class == 1) {
+            if (ph->type == ELF_PROG_LOAD && ph->filesz)
+                read_fs(node, ph->off, ph->filesz, (u8 *)(uaddr)ph->vaddr);
+        } else if (ph64->type == ELF_PROG_LOAD && ph64->filesz) {
+            read_fs(node, ph64->off, ph64->filesz, (u8 *)(uaddr)ph64->vaddr);
+        }
+    }
+    memcpy((u8 *)str_base, (const u8 *)argv_buf, str_bytes);
+    if (env_bytes)
+        memcpy((u8 *)env_base, (const u8 *)envp_buf, env_bytes);
+    memcpy((u8 *)sp, (const u8 *)words, sizeof(reg_t) * nwords);
+    kfree(eh);
     current->mmap_base = MMAP_BASE;
     signal_exec(current);
     for (i = 0; i < FD_MAX; i++) {
@@ -591,16 +602,21 @@ static int sys_exec(struct trap_frame *frame)
     // the user heap starts right after the last segment
     current->brk = (brk_max + PAGE_SIZE - 1) & PAGE_MASK;
 
-    frame->gs = frame->fs = frame->es = frame->ds = __USER_DS;
-    frame->ss = __USER_DS;
-    frame->cs = __USER_CS;
-    frame->eflags = 0x202;          // IF set, bit 1 always one
     current->linux_abi = (osabi == 0xff) ? 1 : 0;
-    frame->eip = entry;
-    frame->esp = sp;
-    frame->useresp = sp;
+    arch_prepare_user_frame(frame, entry, sp);
 
     return 0;
+}
+
+int kernel_execve(const char *path, char *const argv[], char *const envp[],
+                  struct trap_frame *frame)
+{
+    cli();
+    memset((u8 *)frame, 0, sizeof(*frame));
+    frame->ebx = (uaddr)path;
+    frame->ecx = (uaddr)argv;
+    frame->edx = (uaddr)envp;
+    return sys_exec(frame);
 }
 
 static int sys_fork(struct trap_frame *frame)
@@ -612,11 +628,16 @@ static int sys_fork(struct trap_frame *frame)
         struct task_struct *new_task = alloc_task();
         new_task->mm = mm_copy(current->mm);
         new_task->context->esp -= FRAME_SIZE;
+        new_task->context->svc_sp = new_task->context->esp;
         new_task->frame = (struct trap_frame *)(new_task->context->esp);
         *new_task->frame = *frame;
-        new_task->frame->eax = 0;
-        new_task->context->eip = (u32)int_ret_stub;
+        arch_set_fork_result(new_task->frame, 0);
+        new_task->context->eip = (uaddr)int_ret_stub;
         new_task->state = RUNNABLE;
+#ifdef DEBUG_E9
+        printk("fork parent pc=%x child frame=%x sp=%x\n",
+               frame->eip, new_task->frame, new_task->context->esp);
+#endif
         return new_task->pid;
     }
 
@@ -626,27 +647,28 @@ static int sys_fork(struct trap_frame *frame)
 
     struct task_struct *new_task = alloc_task();
     new_task->context->esp -= FRAME_SIZE;
+    new_task->context->svc_sp = new_task->context->esp;
     new_task->frame = (struct trap_frame *)(new_task->context->esp);
     *new_task->frame = *frame;
-    new_task->frame->eax = 0;
+    arch_set_fork_result(new_task->frame, 0);
 
     // The child gets a private copy of the parent's user stack and keeps
     // running at the same stack offset, so locals and return addresses
     // survive the fork.
     memcpy(new_task->user_stack, current->user_stack, USER_STACK_SIZE);
-    u32 parent_top = (u32)current->user_stack + USER_STACK_SIZE;
-    if (frame->esp >= (u32)current->user_stack && frame->esp < parent_top) {
+    uaddr parent_top = (uaddr)current->user_stack + USER_STACK_SIZE;
+    if (frame->esp >= (uaddr)current->user_stack && frame->esp < parent_top) {
         new_task->frame->esp =
-            (u32)new_task->user_stack + (frame->esp - (u32)current->user_stack);
+            (uaddr)new_task->user_stack + (frame->esp - (uaddr)current->user_stack);
     } else {
-        new_task->frame->esp = (u32)new_task->user_stack + USER_STACK_SIZE;
+        new_task->frame->esp = (uaddr)new_task->user_stack + USER_STACK_SIZE;
     }
-    if (frame->ebp >= (u32)current->user_stack && frame->ebp < parent_top) {
+    if (frame->ebp >= (uaddr)current->user_stack && frame->ebp < parent_top) {
         new_task->frame->ebp =
-            (u32)new_task->user_stack + (frame->ebp - (u32)current->user_stack);
+            (uaddr)new_task->user_stack + (frame->ebp - (uaddr)current->user_stack);
     }
 
-    new_task->context->eip = (u32)int_ret_stub;
+    new_task->context->eip = (uaddr)int_ret_stub;
     new_task->state = RUNNABLE;
     return new_task->pid;
 }
@@ -657,10 +679,10 @@ static int sys_print(struct trap_frame *frame)
     // Reject null/near-null pointers. Full user/kernel validation needs real
     // user space: user code currently lives in kernel .rodata, so its string
     // literals legitimately sit above PAGE_OFFSET.
-    if ((u32)str < 0x1000) {
+    if ((uaddr)str < 0x1000) {
         return -1;
     }
-#ifdef DEBUG_E9
+#if defined(DEBUG_E9) && (defined(__i386__) || defined(__x86_64__))
     {   /* mirror user output to the E9 debug port for headless runs */
         const char *c;
         for (c = str; *c; c++) {
@@ -681,6 +703,9 @@ static int sys_exit(struct trap_frame *frame)
 
     current->exit_code = current->linux_abi ? ((frame->ebx & 0xff) << 8)
                                              : frame->ebx;
+#ifdef DEBUG_E9
+    printk("exit task=%s status=%d\n", current->name, frame->ebx);
+#endif
     if (!current->is_thread && current->parent) {
         current->parent->pending_sig |= 1u << SIGCHLD;
     }
@@ -708,8 +733,17 @@ static struct task_struct *task_find_child(struct task_struct *parent,
                                            int pid, int zombie_only)
 {
     struct task_list *node = running_task_head;
+#ifdef DEBUG_E9
+    u32 traversed = 0;
+#endif
     do {
         struct task_struct *t = node->task;
+#ifdef DEBUG_E9
+        if (++traversed > 64) {
+            printk("task ring loop at %d target=%d\n", current->pid, pid);
+            return 0;
+        }
+#endif
         if (!t->is_thread && t->parent == parent &&
                 (!zombie_only || t->state == ZOMBIE) &&
                 (pid == -1 || (int)t->pid == pid)) {
@@ -729,14 +763,29 @@ static int sys_waitpid(struct trap_frame *frame)
     u32 *ustatus = (u32 *)(frame->ecx);
     u32 options = frame->edx;
 
+#ifdef DEBUG_E9
+    printk("waitpid task=%d target=%d options=%x\n", current->pid, pid, options);
+    if (current->pid != 3) {
+        struct task_list *node = running_task_head;
+        do {
+            printk("wait sees %d %s state=%d parent=%d\n",
+                   node->task->pid, node->task->name, node->task->state,
+                   node->task->parent ? node->task->parent->pid : -1);
+            node = node->next;
+        } while (node != running_task_head);
+    }
+#endif
     if (pid == 0 || pid < -1) {
         return -ENOSYS;  // process groups are not supported yet
     }
-    if (options & ~(u32)(WNOHANG | WUNTRACED | 8)) {
+    if (options & ~(uaddr)(WNOHANG | WUNTRACED | 8)) {
         return -EINVAL;
     }
 
     struct task_struct *z;
+#ifdef DEBUG_E9
+    u32 wait_started = tick;
+#endif
     for (;;) {
         z = task_find_child(current, pid, 1);
         if (z != 0) {
@@ -749,12 +798,24 @@ static int sys_waitpid(struct trap_frame *frame)
             return 0;
         }
         // no zombie yet: idle until the child runs and exits
+#ifdef DEBUG_E9
+        if (tick - wait_started > 4000) {
+            struct task_list *node = running_task_head;
+            printk("wait stuck task=%d target=%d\n", current->pid, pid);
+            do {
+                printk("task %d %s state=%d\n", node->task->pid,
+                       node->task->name, node->task->state);
+                node = node->next;
+            } while (node != running_task_head);
+            wait_started = tick;
+        }
+#endif
         sti();
         hlt();
         cli();
     }
 
-    if (ustatus != 0 && (u32)ustatus >= 0x1000) {
+    if (ustatus != 0 && (uaddr)ustatus >= 0x1000) {
         u32 st = z->exit_code;
         if (current->linux_abi && !z->linux_abi) {
             st = (st & 0xff) << 8;
@@ -772,6 +833,7 @@ static int sys_waitpid(struct trap_frame *frame)
     u32 reaped = z->pid;
     kfree(z->context);
     kfree(z->kernel_stack);
+    kfree(z->interrupt_stack);
     kfree(z->user_stack);
     kfree(node);
     kfree(z);
@@ -783,7 +845,10 @@ static int sys_waitpid(struct trap_frame *frame)
 // contents across partial grows.
 static int sys_brk(struct trap_frame *frame)
 {
-    u32 addr = frame->ebx;
+    uaddr addr = frame->ebx;
+#ifdef DEBUG_E9
+    printk("brk request=%x old=%x\n", addr, current->brk);
+#endif
     if (current->mm == 0) {
         return -1;  // kernel threads have no user heap
     }
@@ -792,15 +857,15 @@ static int sys_brk(struct trap_frame *frame)
         return (int)old;
     }
     // keep the heap clear of the user stack
-    u32 heap_limit = USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE;
+    uaddr heap_limit = USER_STACK_VA_TOP - USER_STACK_PAGES * PAGE_SIZE;
     if (addr > heap_limit) {
         return -1;
     }
 
     if (addr > old) {
-        u32 va;
+        uaddr va;
         for (va = old & PAGE_MASK; va < addr; va += PAGE_SIZE) {
-            u32 pa;
+            uaddr pa;
             if (!get_mapping(current->mm->pdt, va, &pa)) {
                 pa = page_alloc();
                 map(current->mm->pdt, va, pa,
@@ -809,10 +874,10 @@ static int sys_brk(struct trap_frame *frame)
             }
         }
     } else {
-        u32 va;
+        uaddr va;
         for (va = (addr + PAGE_SIZE - 1) & PAGE_MASK; va < old;
                 va += PAGE_SIZE) {
-            u32 pa;
+            uaddr pa;
             if (get_mapping(current->mm->pdt, va, &pa)) {
                 unmap(current->mm->pdt, va);
                 page_free(pa);
@@ -830,7 +895,7 @@ static int sys_brk(struct trap_frame *frame)
 static int sys_nanosleep(struct trap_frame *frame)
 {
     u32 *req = (u32 *)(frame->ebx);
-    if ((u32)req < 0x1000) {
+    if ((uaddr)req < 0x1000) {
         return -1;
     }
     u32 ms = req[0] * 1000 + req[1] / 1000000;
@@ -860,7 +925,7 @@ static int sys_read(struct trap_frame *frame)
     u8 *ubuf = (u8 *)(frame->ecx);
     u32 count = frame->edx;
     if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
-            (u32)ubuf < 0x1000 || count == 0) {
+            (uaddr)ubuf < 0x1000 || count == 0) {
         return -1;
     }
 
@@ -907,13 +972,13 @@ static int sys_write(struct trap_frame *frame)
     const char *ubuf = (const char *)(frame->ecx);
     u32 count = frame->edx;
     if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
-            (u32)ubuf < 0x1000) {
+            (uaddr)ubuf < 0x1000) {
         return -1;
     }
 
     struct file *f = &current->fds[fd];
     if (f->kind == FD_TTY_OUT) {
-#ifdef DEBUG_E9
+#if defined(DEBUG_E9) && (defined(__i386__) || defined(__x86_64__))
         {   /* mirror output to the E9 debug port for headless runs */
             const char *c;
             for (c = ubuf; c < ubuf + count; c++) {
@@ -951,7 +1016,7 @@ static int sys_write(struct trap_frame *frame)
         if (n < 0) {
             return n;
         }
-        f->ofd->offset = off + (u32)n;
+        f->ofd->offset = off + (uaddr)n;
         return n;
     }
     if (f->kind == FD_DIR) {
@@ -973,9 +1038,12 @@ static int sys_open(struct trap_frame *frame)
     u32 mode = current->linux_abi ? (frame->edx & 07777) : 0;
     int fd, r;
 
-    if ((u32)name < 0x1000) {
+    if ((uaddr)name < 0x1000) {
         return -EFAULT;
     }
+#ifdef DEBUG_E9
+    printk("open path=%s flags=%x\n", name, flags);
+#endif
     r = split_path(name, &parent, base, sizeof(base));
     if (r < 0) {
         return r;
@@ -1026,6 +1094,12 @@ static int sys_open(struct trap_frame *frame)
     }
 
     acc = flags & 3;
+    {
+        u32 need = acc == O_RDONLY ? R_OK :
+            (acc == O_WRONLY ? W_OK : R_OK | W_OK);
+        int perm = fs_permission(node, need);
+        if (perm < 0) return perm;
+    }
     if ((node->flags & 0x7) == FS_DIRECTORY) {
         if (acc != O_RDONLY) {
             return -EISDIR;
@@ -1121,7 +1195,7 @@ static int sys_lseek(struct trap_frame *frame)
         case SEEK_END: base = f->node->length; break;
         default: return -EINVAL;
     }
-    if (offset < 0 && (u32)(-offset) > base) {
+    if (offset < 0 && (uaddr)(-offset) > base) {
         return -EINVAL;
     }
     f->ofd->offset = base + offset;
@@ -1133,7 +1207,7 @@ static int sys_fstat(struct trap_frame *frame)
     int fd = (int)frame->ebx;
     struct stat *ust = (struct stat *)(frame->ecx);
     if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
-            (u32)ust < 0x1000) {
+            (uaddr)ust < 0x1000) {
         return -EBADF;
     }
 
@@ -1274,7 +1348,7 @@ static int sys_pipe(struct trap_frame *frame)
     struct ofd *ro, *wo;
     int rfd, wfd;
 
-    if ((u32)ufds < 0x1000) {
+    if ((uaddr)ufds < 0x1000) {
         return -EFAULT;
     }
     p = pipe_create();
@@ -1370,14 +1444,14 @@ static void copy_string(char *dst, const char *src, u32 max)
 static int sys_uname(struct trap_frame *frame)
 {
     struct utsname *u = (struct utsname *)(frame->ebx);
-    if ((u32)u < 0x1000) {
+    if ((uaddr)u < 0x1000) {
         return -EFAULT;
     }
     copy_string(u->sysname, "a-mini-kernel", sizeof(u->sysname));
     copy_string(u->nodename, "mini", sizeof(u->nodename));
     copy_string(u->release, "0.2", sizeof(u->release));
     copy_string(u->version, "posix-phase1", sizeof(u->version));
-    copy_string(u->machine, "i686", sizeof(u->machine));
+    copy_string(u->machine, ARCH_NAME, sizeof(u->machine));
     copy_string(u->domainname, "(none)", sizeof(u->domainname));
     return 0;
 }
@@ -1387,7 +1461,7 @@ static int sys_clock_gettime(struct trap_frame *frame)
     u32 clk = frame->ebx;
     struct timespec *ts = (struct timespec *)(frame->ecx);
 
-    if ((u32)ts < 0x1000) {
+    if ((uaddr)ts < 0x1000) {
         return -EFAULT;
     }
     if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC) {
@@ -1402,7 +1476,7 @@ static int sys_gettimeofday(struct trap_frame *frame)
 {
     struct timeval *tv = (struct timeval *)(frame->ebx);
     if (tv != 0) {
-        if ((u32)tv < 0x1000) {
+        if ((uaddr)tv < 0x1000) {
             return -EFAULT;
         }
         tv->tv_sec = tick / TIMER_HZ;
@@ -1437,9 +1511,9 @@ static int sys_getcwd(struct trap_frame *frame)
 {
     char *buf = (char *)(frame->ebx);
     u32 size = frame->ecx;
-    u32 len = (u32)strlen(current->cwd) + 1;
+    u32 len = (uaddr)strlen(current->cwd) + 1;
 
-    if ((u32)buf < 0x1000) {
+    if ((uaddr)buf < 0x1000) {
         return -EFAULT;
     }
     if (size < len) {
@@ -1456,7 +1530,7 @@ static int sys_stat(struct trap_frame *frame)
     struct fs_node *node;
     int r;
 
-    if ((u32)ust < 0x1000) {
+    if ((uaddr)ust < 0x1000) {
         return -EFAULT;
     }
     r = resolve_path(path, &node);
@@ -1483,7 +1557,7 @@ static int sys_access(struct trap_frame *frame)
     }
     if (mode & X_OK) {
         char abs[256];
-        if ((node->flags & 0x7) != FS_DIRECTORY && !(node->mask & 0111)) {
+        if (fs_permission(node, X_OK) < 0) {
             return -EACCES;
         }
         if (path_normalize(path, abs, sizeof(abs)) == 0 &&
@@ -1509,13 +1583,14 @@ static int mmap_prot_flags(u32 prot)
 static int sys_mmap(struct trap_frame *frame)
 {
     struct mmap_args *ma = (struct mmap_args *)frame->ebx;
-    u32 addr, len, prot, flags, off;
+    uaddr addr, len, off;
+    u32 prot, flags;
     int fd;
-    u32 start, va, mapped_len;
+    uaddr start, va, mapped_len;
     struct fs_node *node = 0;
     int pflags;
 
-    if ((u32)ma < 0x1000) {
+    if ((uaddr)ma < 0x1000) {
         return -EFAULT;
     }
     addr = ma->addr;
@@ -1534,20 +1609,17 @@ static int sys_mmap(struct trap_frame *frame)
     }
 
     if (flags & MAP_FIXED) {
-        if ((addr & ~PAGE_MASK) != 0 || addr < MMAP_BASE) {
+        if ((addr & ~PAGE_MASK) != 0 || addr < 0x1000)
             return -EINVAL;
-        }
         start = addr;
     } else {
         start = current->mmap_base;
     }
-    if ((off & ~PAGE_MASK) != 0) {
+    if ((off & ~PAGE_MASK) != 0)
         return -EINVAL;
-    }
-    if (start + mapped_len < start || start + mapped_len > PAGE_OFFSET ||
-            start < MMAP_BASE) {
+    if (start + mapped_len < start || start + mapped_len > USER_ADDR_LIMIT ||
+            start < 0x1000 || (!(flags & MAP_FIXED) && start < MMAP_BASE))
         return -ENOMEM;
-    }
 
     if (!(flags & MAP_ANONYMOUS)) {
         if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
@@ -1559,7 +1631,7 @@ static int sys_mmap(struct trap_frame *frame)
 
     pflags = mmap_prot_flags(prot);
     for (va = start; va < start + mapped_len; va += PAGE_SIZE) {
-        u32 pa = page_alloc();
+        uaddr pa = page_alloc();
         u8 *kp = (u8 *)(pa + PAGE_OFFSET);
 
         bzero(kp, PAGE_SIZE);
@@ -1577,19 +1649,26 @@ static int sys_mmap(struct trap_frame *frame)
 
 static int sys_munmap(struct trap_frame *frame)
 {
-    u32 addr = frame->ebx;
-    u32 len = frame->ecx;
-    u32 va;
+    uaddr addr = frame->ebx;
+    uaddr len = frame->ecx;
+    uaddr va;
 
     if (!current->mm || addr < MMAP_BASE || (addr & ~PAGE_MASK)) {
+#ifdef DEBUG_E9
+        printk("munmap addr=%x len=%x mm=%x base=%x\n",
+               addr, frame->ecx, current->mm, MMAP_BASE);
+#endif
         return -EINVAL;
     }
     len = (len + PAGE_SIZE - 1) & PAGE_MASK;
-    if (len == 0 || addr + len < addr || addr + len > PAGE_OFFSET) {
+    if (len == 0 || addr + len < addr || addr + len > USER_ADDR_LIMIT) {
+#ifdef DEBUG_E9
+        printk("munmap range addr=%x len=%x\n", addr, frame->ecx);
+#endif
         return -EINVAL;
     }
     for (va = addr; va < addr + len; va += PAGE_SIZE) {
-        u32 pa;
+        uaddr pa;
         if (get_mapping(current->mm->pdt, va, &pa)) {
             unmap(current->mm->pdt, va);
             page_free(pa);
@@ -1600,22 +1679,22 @@ static int sys_munmap(struct trap_frame *frame)
 
 static int sys_mprotect(struct trap_frame *frame)
 {
-    u32 addr = frame->ebx;
-    u32 len = frame->ecx;
+    uaddr addr = frame->ebx;
+    uaddr len = frame->ecx;
     u32 prot = frame->edx;
-    u32 va;
+    uaddr va;
     int pflags;
 
     if (!current->mm || addr < MMAP_BASE || (addr & ~PAGE_MASK)) {
         return -EINVAL;
     }
     len = (len + PAGE_SIZE - 1) & PAGE_MASK;
-    if (len == 0 || addr + len < addr || addr + len > PAGE_OFFSET) {
+    if (len == 0 || addr + len < addr || addr + len > USER_ADDR_LIMIT) {
         return -EINVAL;
     }
     pflags = mmap_prot_flags(prot);
     for (va = addr; va < addr + len; va += PAGE_SIZE) {
-        u32 pa;
+        uaddr pa;
         if (get_mapping(current->mm->pdt, va, &pa)) {
             map(current->mm->pdt, va, pa, pflags);
         }
@@ -1655,7 +1734,7 @@ static int sys_ioctl(struct trap_frame *frame)
         return 0;
     }
     if (req == FIONBIO) {
-        if ((u32)arg < 0x1000) {
+        if ((uaddr)arg < 0x1000) {
             return -EFAULT;
         }
         if (f->ofd) {
@@ -1666,7 +1745,7 @@ static int sys_ioctl(struct trap_frame *frame)
     if (f->kind != FD_TTY_IN && f->kind != FD_TTY_OUT) {
         return -ENOTTY;
     }
-    if ((u32)arg < 0x1000) {
+    if ((uaddr)arg < 0x1000) {
         return -EFAULT;
     }
 
@@ -1694,7 +1773,7 @@ static int sys_ioctl(struct trap_frame *frame)
         *(int *)arg = (int)t->pgrp;
         return 0;
     case TIOCSPGRP:
-        t->pgrp = (u32)(*(int *)arg);
+        t->pgrp = (uaddr)(*(int *)arg);
         return 0;
     default:
         return -ENOTTY;
@@ -1703,7 +1782,15 @@ static int sys_ioctl(struct trap_frame *frame)
 
 static int sys_kill(struct trap_frame *frame)
 {
-    return signal_kill((int)frame->ebx, (int)frame->ecx);
+    int pid = (int)frame->ebx;
+    if (pid > 0 && current->euid != 0) {
+        struct task_struct *target = signal_find_task((u32)pid);
+        if (!target) return -ESRCH;
+        if (target->uid != current->uid && target->euid != current->uid) {
+            return -EPERM;
+        }
+    }
+    return signal_kill(pid, (int)frame->ecx);
 }
 
 static int sys_signal_raise(struct trap_frame *frame)
@@ -1721,7 +1808,7 @@ static int sys_sigaction(struct trap_frame *frame)
         return -EINVAL;
     }
     if (old != 0) {
-        if ((u32)old < 0x1000) {
+        if ((uaddr)old < 0x1000) {
             return -EFAULT;
         }
         old->sa_handler = (void (*)(int))current->sig_handler[sig];
@@ -1730,16 +1817,16 @@ static int sys_sigaction(struct trap_frame *frame)
         old->sa_restorer = (void (*)(void))current->sig_restorer[sig];
     }
     if (act != 0) {
-        u32 h, r;
-        if ((u32)act < 0x1000) {
+        reg_t h, r;
+        if ((uaddr)act < 0x1000) {
             return -EFAULT;
         }
-        h = (u32)act->sa_handler;
-        r = (u32)act->sa_restorer;
-        if (h != (u32)SIG_DFL && h != (u32)SIG_IGN && h < 0x1000) {
+        h = (uaddr)act->sa_handler;
+        r = (uaddr)act->sa_restorer;
+        if (h != (uaddr)SIG_DFL && h != (uaddr)SIG_IGN && h < 0x1000) {
             return -EFAULT;
         }
-        if (h != (u32)SIG_DFL && h != (u32)SIG_IGN && r < 0x1000) {
+        if (h != (uaddr)SIG_DFL && h != (uaddr)SIG_IGN && r < 0x1000) {
             return -EINVAL;
         }
         current->sig_handler[sig] = h;
@@ -1758,7 +1845,7 @@ static int sys_sigprocmask(struct trap_frame *frame)
     u32 mask;
 
     if (old != 0) {
-        if ((u32)old < 0x1000) {
+        if ((uaddr)old < 0x1000) {
             return -EFAULT;
         }
         *old = current->blocked_sig;
@@ -1766,7 +1853,7 @@ static int sys_sigprocmask(struct trap_frame *frame)
     if (set == 0) {
         return 0;
     }
-    if ((u32)set < 0x1000) {
+    if ((uaddr)set < 0x1000) {
         return -EFAULT;
     }
     mask = *set;
@@ -1795,7 +1882,7 @@ static int sys_sigreturn(struct trap_frame *frame)
 static int sys_sigpending(struct trap_frame *frame)
 {
     u32 *set = (u32 *)(frame->ebx);
-    if ((u32)set < 0x1000) {
+    if ((uaddr)set < 0x1000) {
         return -EFAULT;
     }
     *set = current->pending_sig & current->blocked_sig;
@@ -1949,7 +2036,7 @@ static int get_inet_addr(void *addr, u32 len, u32 *a, u16 *p)
 {
     struct sockaddr_in *sin = (struct sockaddr_in *)addr;
 
-    if ((u32)sin < 0x1000 || len < sizeof(struct sockaddr_in)) {
+    if ((uaddr)sin < 0x1000 || len < sizeof(struct sockaddr_in)) {
         return -EFAULT;
     }
     if (sin->sin_family != AF_INET) {
@@ -1968,14 +2055,14 @@ static int put_inet_addr(void *addr, int *ulen, u32 a, u16 p)
     if (addr == 0) {
         return 0;
     }
-    if ((u32)addr < 0x1000 || (ulen && (u32)ulen < 0x1000)) {
+    if ((uaddr)addr < 0x1000 || (ulen && (uaddr)ulen < 0x1000)) {
         return -EFAULT;
     }
     memset((u8 *)&tmp, 0, sizeof(tmp));
     tmp.sin_family = AF_INET;
     tmp.sin_port = k_htons(p);
     tmp.sin_addr.s_addr = k_htonl(a);
-    cap = ulen ? (u32)*ulen : sizeof(tmp);
+    cap = ulen ? (uaddr)*ulen : sizeof(tmp);
     if (cap > sizeof(tmp)) {
         cap = sizeof(tmp);
     }
@@ -2025,7 +2112,7 @@ static int get_unix_path(void *addr, u32 len, char *path, u32 max)
     struct sockaddr_un *usa = (struct sockaddr_un *)addr;
     u32 n;
 
-    if ((u32)usa < 0x1000 || len < 2) {
+    if ((uaddr)usa < 0x1000 || len < 2) {
         return -EFAULT;
     }
     if (usa->sun_family != AF_UNIX) {
@@ -2048,13 +2135,13 @@ static int put_unix_addr(void *addr, int *ulen, const char *path)
     if (addr == 0) {
         return 0;
     }
-    if ((u32)addr < 0x1000 || (ulen && (u32)ulen < 0x1000)) {
+    if ((uaddr)addr < 0x1000 || (ulen && (uaddr)ulen < 0x1000)) {
         return -EFAULT;
     }
     memset((u8 *)&tmp, 0, sizeof(tmp));
     tmp.sun_family = AF_UNIX;
     copy_string(tmp.sun_path, path, sizeof(tmp.sun_path));
-    cap = ulen ? (u32)*ulen : sizeof(tmp);
+    cap = ulen ? (uaddr)*ulen : sizeof(tmp);
     if (cap > sizeof(tmp)) {
         cap = sizeof(tmp);
     }
@@ -2075,7 +2162,7 @@ static int sys_bind(struct trap_frame *frame)
     if (!s) {
         return -ENOTSOCK;
     }
-    if (frame->edx >= 2 && (u32)frame->ecx >= 0x1000 &&
+    if (frame->edx >= 2 && (uaddr)frame->ecx >= 0x1000 &&
             *(u16 *)(frame->ecx) == AF_INET) {
         u32 a;
         u16 p;
@@ -2116,7 +2203,7 @@ static int sys_connect(struct trap_frame *frame)
     if (!s) {
         return -ENOTSOCK;
     }
-    if (frame->edx >= 2 && (u32)frame->ecx >= 0x1000 &&
+    if (frame->edx >= 2 && (uaddr)frame->ecx >= 0x1000 &&
             *(u16 *)(frame->ecx) == AF_INET) {
         u32 a;
         u16 p;
@@ -2196,7 +2283,7 @@ static int sys_socketpair(struct trap_frame *frame)
     if (type != SOCK_STREAM || proto != 0) {
         return -EPROTONOSUPPORT;
     }
-    if ((u32)sv < 0x1000) {
+    if ((uaddr)sv < 0x1000) {
         return -EFAULT;
     }
     a = socket_new();
@@ -2344,15 +2431,15 @@ static int sys_poll(struct trap_frame *frame)
     u32 start = tick;
     u32 timeout_ticks = 0;
 
-    if ((u32)pfds < 0x1000) {
+    if ((uaddr)pfds < 0x1000) {
         return -EFAULT;
     }
     if (nfds > 64) {
         return -EINVAL;
     }
     if (timeout >= 0) {
-        if (timeout > 0 && (u32)timeout < 0x7FFFFFFF / TIMER_HZ) {
-            timeout_ticks = (u32)timeout * TIMER_HZ / 1000;
+        if (timeout > 0 && (uaddr)timeout < 0x7FFFFFFF / TIMER_HZ) {
+            timeout_ticks = (uaddr)timeout * TIMER_HZ / 1000;
             if (timeout_ticks == 0) {
                 timeout_ticks = 1;
             }
@@ -2409,7 +2496,7 @@ static int sys_sendto(struct trap_frame *frame)
     u16 port;
     int r;
 
-    if ((u32)a < 0x1000 || (u32)a->buf < 0x1000) {
+    if ((uaddr)a < 0x1000 || (uaddr)a->buf < 0x1000) {
         return -EFAULT;
     }
     s = socket_of_fd(a->fd);
@@ -2434,7 +2521,7 @@ static int sys_recvfrom(struct trap_frame *frame)
     u16 port = 0;
     int r;
 
-    if ((u32)a < 0x1000 || (u32)a->buf < 0x1000) {
+    if ((uaddr)a < 0x1000 || (uaddr)a->buf < 0x1000) {
         return -EFAULT;
     }
     s = socket_of_fd(a->fd);
@@ -2473,14 +2560,12 @@ static int sys_getsockopt(struct trap_frame *frame)
 
 static int sys_thread_create(struct trap_frame *frame)
 {
-    u32 entry = frame->ebx;
-    u32 arg = frame->ecx;
-    u32 stack = frame->edx;
+    uaddr entry = frame->ebx;
+    uaddr arg = frame->ecx;
+    uaddr stack = frame->edx;
     struct task_struct *t;
-    u32 sp;
-
     if (!current->mm || entry < 0x1000 || stack < 0x1000 ||
-            stack >= PAGE_OFFSET) {
+            stack >= USER_ADDR_LIMIT) {
         return -EINVAL;
     }
     t = alloc_task();
@@ -2498,19 +2583,15 @@ static int sys_thread_create(struct trap_frame *frame)
     t->tty = current->tty;
 
     t->context->esp -= FRAME_SIZE;
+    t->context->svc_sp = t->context->esp;
     t->frame = (struct trap_frame *)(t->context->esp);
     memset((u8 *)t->frame, 0, FRAME_SIZE);
     t->frame->gs = t->frame->fs = t->frame->es = t->frame->ds = __USER_DS;
     t->frame->ss = __USER_DS;
     t->frame->cs = __USER_CS;
     t->frame->eflags = 0x202;
-    t->frame->eip = entry;
-    sp = (stack - 8) & ~15u;
-    ((u32 *)sp)[0] = 0;     /* fake return address */
-    ((u32 *)sp)[1] = arg;   /* first argument */
-    t->frame->esp = sp;
-    t->frame->useresp = sp;
-    t->context->eip = (u32)int_ret_stub;
+    arch_prepare_thread_frame(t->frame, entry, arg, stack);
+    t->context->eip = (uaddr)int_ret_stub;
     t->state = RUNNABLE;
     return (int)t->pid;
 }
@@ -2547,7 +2628,7 @@ static int sys_thread_wait(struct trap_frame *frame)
     u32 options = frame->edx;
     struct task_struct *t = 0;
 
-    if (ustatus != 0 && (u32)ustatus < 0x1000) {
+    if (ustatus != 0 && (uaddr)ustatus < 0x1000) {
         return -EFAULT;
     }
     for (;;) {
@@ -2579,6 +2660,7 @@ static int sys_thread_wait(struct trap_frame *frame)
             prev->next = node->next;
             kfree(t->context);
             kfree(t->kernel_stack);
+            kfree(t->interrupt_stack);
             kfree(t->user_stack);
             kfree(node);
             kfree(t);
@@ -2593,7 +2675,7 @@ static int sys_futex(struct trap_frame *frame)
     volatile u32 *addr = (volatile u32 *)(frame->ecx);
     u32 val = frame->edx;
 
-    if ((u32)addr < 0x1000 || (u32)addr >= PAGE_OFFSET) {
+    if ((uaddr)addr < 0x1000 || (uaddr)addr >= USER_ADDR_LIMIT) {
         return -EFAULT;
     }
     if (op == 0) {          /* FUTEX_WAIT */
@@ -2634,6 +2716,9 @@ static int sys_chmod(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
+    if (current->euid != 0 && current->euid != node->uid) {
+        return -EPERM;
+    }
     node->mask = mode;
     if (path_normalize(path, abs, sizeof(abs)) == 0) {
         jfs_log(JFS_CHMOD, abs, 0, mode, 0, 0);
@@ -2647,6 +2732,9 @@ static int sys_fchmod(struct trap_frame *frame)
     u32 mode = frame->ecx & 07777;
     if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) {
         return -EBADF;
+    }
+    if (current->euid != 0 && current->euid != current->fds[fd].node->uid) {
+        return -EPERM;
     }
     current->fds[fd].node->mask = mode;
     if (current->fds[fd].ofd && current->fds[fd].ofd->path[0]) {
@@ -2836,7 +2924,7 @@ static int sys_getdents(struct trap_frame *frame)
     char *ubuf = (char *)(frame->ecx);
     u32 max = frame->edx;
     if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
-            current->fds[fd].kind != FD_DIR || (u32)ubuf < 0x1000 || max == 0) {
+            current->fds[fd].kind != FD_DIR || (uaddr)ubuf < 0x1000 || max == 0) {
         return -1;
     }
 
@@ -2893,7 +2981,7 @@ static int sys_ps(struct trap_frame *frame)
     static const char state_char[] = "UNESRZ";
     char *ubuf = (char *)(frame->ebx);
     u32 max = frame->ecx;
-    if ((u32)ubuf < 0x1000 || max == 0) {
+    if ((uaddr)ubuf < 0x1000 || max == 0) {
         return -1;
     }
 
@@ -2908,7 +2996,7 @@ static int sys_ps(struct trap_frame *frame)
         ubuf[pos++] = ' ';
         ubuf[pos++] = state_char[t->state > ZOMBIE ? 0 : t->state];
         ubuf[pos++] = ' ';
-        pos += ps_utoa(ubuf + pos, max - pos, (u32)(t->tty - tty));
+        pos += ps_utoa(ubuf + pos, max - pos, (uaddr)(t->tty - tty));
         ubuf[pos++] = ' ';
         pos += ps_utoa(ubuf + pos, max - pos, t->priority);
         ubuf[pos++] = ' ';
@@ -2931,7 +3019,7 @@ static int sys_gfx(struct trap_frame *frame)
 {
     struct gfx_req *req = (struct gfx_req *)frame->ebx;
 
-    if ((u32)req < 0x1000 || (u32)req >= PAGE_OFFSET) {
+    if ((uaddr)req < 0x1000 || (uaddr)req >= USER_ADDR_LIMIT) {
         return -1;
     }
 
@@ -2972,7 +3060,7 @@ static int sys_gfx(struct trap_frame *frame)
                       (char)req->ch, (u8)req->color);
         return 0;
     case GFX_TEXT:
-        if ((u32)req->text < 0x1000 || (u32)req->text >= PAGE_OFFSET) {
+        if ((uaddr)req->text < 0x1000 || (uaddr)req->text >= USER_ADDR_LIMIT) {
             return -1;
         }
         gfx_draw_text((int)req->x, (int)req->y, req->text, (u8)req->color);
@@ -3034,6 +3122,20 @@ void init_syscall()
     syscalls[NR_ftruncate] = &sys_ftruncate;
     syscalls[NR_chmod] = &sys_chmod;
     syscalls[NR_fchmod] = &sys_fchmod;
+    syscalls[NR_getuid] = &sys_getuid;
+    syscalls[NR_geteuid] = &sys_geteuid;
+    syscalls[NR_getgid] = &sys_getgid;
+    syscalls[NR_getegid] = &sys_getegid;
+    syscalls[NR_setuid] = &sys_setuid;
+    syscalls[NR_setgid] = &sys_setgid;
+    syscalls[NR_seteuid] = &sys_seteuid;
+    syscalls[NR_setegid] = &sys_setegid;
+    syscalls[NR_getgroups] = &sys_getgroups;
+    syscalls[NR_setgroups] = &sys_setgroups;
+    syscalls[NR_chown] = &sys_chown;
+    syscalls[NR_fchown] = &sys_fchown;
+    syscalls[NR_setresuid] = &sys_setresuid;
+    syscalls[NR_setresgid] = &sys_setresgid;
     syscalls[NR_mmap] = &sys_mmap;
     syscalls[NR_munmap] = &sys_munmap;
     syscalls[NR_mprotect] = &sys_mprotect;
@@ -3080,8 +3182,13 @@ void init_syscall()
 /* ------------------------------------------------------------------ */
 
 struct linux_iovec {
+#if __SIZEOF_POINTER__ == 8
+    uaddr base;
+    uaddr len;
+#else
     u32 base;
     u32 len;
+#endif
 };
 
 struct linux_user_desc {
@@ -3098,16 +3205,22 @@ struct linux_k_sigaction {
     u32 mask[2];
 };
 
+#if !defined(__aarch64__)
 static u8 tls_used[GDT_ENTRY_NUM];
+#endif
 
 static int linux_set_thread_area(struct trap_frame *frame)
 {
+#if defined(__aarch64__)
+    (void)frame;
+    return -ENOSYS;
+#else
     struct linux_user_desc *u = (struct linux_user_desc *)frame->ebx;
     int entry = -1, i;
     u32 base, limit, flags;
     struct gdt_desc_struct *g;
 
-    if ((u32)u < 0x1000) {
+    if ((uaddr)u < 0x1000) {
         return -EFAULT;
     }
     if (u->entry_number != 0xffffffffu) {
@@ -3127,6 +3240,8 @@ static int linux_set_thread_area(struct trap_frame *frame)
         }
     }
     tls_used[entry] = 1;
+    current->tls_entry = entry;
+    current->tls = u->base_addr;
     base = u->base_addr;
     limit = u->limit;
     flags = u->flags;
@@ -3144,8 +3259,9 @@ static int linux_set_thread_area(struct trap_frame *frame)
     g->zero = 0;
     g->db = (flags & 1) ? 1 : 0;
     g->g = (flags & (1u << 4)) ? 1 : 0;
-    u->entry_number = (u32)entry;
+    u->entry_number = (uaddr)entry;
     return 0;
+#endif
 }
 
 static int linux_mmap2(struct trap_frame *frame)
@@ -3159,10 +3275,19 @@ static int linux_mmap2(struct trap_frame *frame)
     ma.prot = frame->edx;
     ma.flags = frame->esi;
     ma.fd = (int)frame->edi;
+#if __SIZEOF_POINTER__ == 8
+    ma.offset = frame->ebp;
+#else
     ma.offset = frame->ebp * PAGE_SIZE;
-    frame->ebx = (u32)&ma;
+#endif
+    frame->ebx = (uaddr)&ma;
     r = sys_mmap(frame);
     frame->ebx = oldebx;
+#ifdef DEBUG_E9
+    if (r < 0)
+        printk("mmap failed addr=%x len=%x flags=%x off=%x ret=%d\n",
+               ma.addr, ma.len, ma.flags, ma.offset, r);
+#endif
     return r;
 }
 
@@ -3174,7 +3299,7 @@ static int linux_writev(struct trap_frame *frame)
     int total = 0, i;
     u32 oe = frame->ebx, oc = frame->ecx, od = frame->edx;
 
-    if (cnt < 0 || (cnt && (u32)iov < 0x1000)) {
+    if (cnt < 0 || (cnt && (uaddr)iov < 0x1000)) {
         return -EFAULT;
     }
     for (i = 0; i < cnt; i++) {
@@ -3182,7 +3307,7 @@ static int linux_writev(struct trap_frame *frame)
         if (!iov[i].len) {
             continue;
         }
-        frame->ebx = (u32)fd;
+        frame->ebx = (uaddr)fd;
         frame->ecx = iov[i].base;
         frame->edx = iov[i].len;
         r = sys_write(frame);
@@ -3191,7 +3316,7 @@ static int linux_writev(struct trap_frame *frame)
             return total ? total : r;
         }
         total += r;
-        if ((u32)r < iov[i].len) {
+        if ((uaddr)r < iov[i].len) {
             break;
         }
     }
@@ -3207,7 +3332,7 @@ static int linux_readv(struct trap_frame *frame)
     int total = 0, i;
     u32 oe = frame->ebx, oc = frame->ecx, od = frame->edx;
 
-    if (cnt < 0 || (cnt && (u32)iov < 0x1000)) {
+    if (cnt < 0 || (cnt && (uaddr)iov < 0x1000)) {
         return -EFAULT;
     }
     for (i = 0; i < cnt; i++) {
@@ -3215,7 +3340,7 @@ static int linux_readv(struct trap_frame *frame)
         if (!iov[i].len) {
             continue;
         }
-        frame->ebx = (u32)fd;
+        frame->ebx = (uaddr)fd;
         frame->ecx = iov[i].base;
         frame->edx = iov[i].len;
         r = sys_read(frame);
@@ -3224,7 +3349,7 @@ static int linux_readv(struct trap_frame *frame)
             return total ? total : r;
         }
         total += r;
-        if ((u32)r < iov[i].len) {
+        if ((uaddr)r < iov[i].len) {
             break;
         }
     }
@@ -3242,7 +3367,7 @@ static int linux_sigaction(struct trap_frame *frame)
         return -EINVAL;
     }
     if (old) {
-        if ((u32)old < 0x1000) {
+        if ((uaddr)old < 0x1000) {
             return -EFAULT;
         }
         old->handler = current->sig_handler[sig];
@@ -3252,7 +3377,7 @@ static int linux_sigaction(struct trap_frame *frame)
         old->mask[1] = 0;
     }
     if (act) {
-        if ((u32)act < 0x1000) {
+        if ((uaddr)act < 0x1000) {
             return -EFAULT;
         }
         current->sig_handler[sig] = act->handler;
@@ -3268,7 +3393,7 @@ static int linux_getrandom(struct trap_frame *frame)
     u8 *buf = (u8 *)frame->ebx;
     u32 len = frame->ecx;
 
-    if ((u32)buf < 0x1000 && len) {
+    if ((uaddr)buf < 0x1000 && len) {
         return -EFAULT;
     }
     memset(buf, 0, len);
@@ -3280,7 +3405,7 @@ static int linux_clock_gettime(struct trap_frame *frame, int is64)
     u32 clk = frame->ebx;
     u32 *ts = (u32 *)(frame->ecx);
 
-    if ((u32)ts < 0x1000) {
+    if ((uaddr)ts < 0x1000) {
         return -EFAULT;
     }
     if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC) {
@@ -3305,7 +3430,7 @@ static int linux_prlimit64(struct trap_frame *frame)
     u32 val = (res == 7) ? 16 : (64u * 1024u * 1024u);
 
     if (old) {
-        if ((u32)old < 0x1000) {
+        if ((uaddr)old < 0x1000) {
             return -EFAULT;
         }
         old[0] = val; old[1] = 0;
@@ -3314,7 +3439,7 @@ static int linux_prlimit64(struct trap_frame *frame)
     return 0;
 }
 
-#define LINUX_AT_FDCWD ((u32)-100)
+#define LINUX_AT_FDCWD ((uaddr)-100)
 #define LINUX_AT_EMPTY_PATH 0x1000
 
 static int linux_getdents64(struct trap_frame *frame)
@@ -3327,7 +3452,7 @@ static int linux_getdents64(struct trap_frame *frame)
     struct dirent *de;
 
     if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used ||
-            (u32)buf < 0x1000) {
+            (uaddr)buf < 0x1000) {
         return -EFAULT;
     }
     f = &current->fds[fd];
@@ -3335,7 +3460,7 @@ static int linux_getdents64(struct trap_frame *frame)
         return -ENOTDIR;
     }
     while ((de = readdir_fs(f->node, f->ofd->offset)) != 0) {
-        u32 nlen = (u32)strlen(de->name);
+        u32 nlen = (uaddr)strlen(de->name);
         u32 reclen = (19 + nlen + 1 + 7) & ~7u;
         struct fs_node *child;
         u8 *p;
@@ -3367,10 +3492,10 @@ static int linux_statx(struct trap_frame *frame)
     struct file *f = 0;
     u32 mode, size, ino, now;
 
-    if ((u32)stx < 0x1000) {
+    if ((uaddr)stx < 0x1000) {
         return -EFAULT;
     }
-    if ((u32)path < 0x1000) {
+    if ((uaddr)path < 0x1000) {
         return -EFAULT;
     }
     if (!*path) {
@@ -3446,6 +3571,19 @@ static int linux_statx(struct trap_frame *frame)
 static int linux_abs_from_dir(int dirfd, const char *path, char *abs,
                               u32 max);
 
+static u32 linux_open_flags(u32 flags)
+{
+#if defined(__aarch64__)
+    u32 out = flags & ~(040000u | 0100000u | 0400000u);
+    if (flags & 040000u) out |= O_DIRECTORY;
+    if (flags & 0100000u) out |= O_NOFOLLOW;
+    if (flags & 0400000u) out |= O_LARGEFILE;
+    return out;
+#else
+    return flags;
+#endif
+}
+
 static int linux_openat(struct trap_frame *frame)
 {
     char abs[160];
@@ -3455,8 +3593,8 @@ static int linux_openat(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
-    frame->ebx = (u32)abs;
-    frame->ecx = frame->edx;
+    frame->ebx = (uaddr)abs;
+    frame->ecx = linux_open_flags(frame->edx);
     frame->edx = frame->esi;
     return sys_open(frame);
 }
@@ -3468,7 +3606,7 @@ static int linux_pselect6(struct trap_frame *frame)
     u32 *wset = (u32 *)frame->edx;
     u32 *eset = (u32 *)frame->esi;
     u32 *ts = (u32 *)frame->edi;
-    u32 *sigdata = (u32 *)frame->ebp;
+    uaddr *sigdata = (uaddr *)frame->ebp;
     u32 orig_r[2] = { 0, 0 }, orig_w[2] = { 0, 0 }, orig_e[2] = { 0, 0 };
     u32 words, i, start = tick, timeout_ticks = 0;
     u32 oldmask = current->blocked_sig;
@@ -3477,22 +3615,25 @@ static int linux_pselect6(struct trap_frame *frame)
     if (nfds < 0 || nfds > FD_MAX) {
         return -EINVAL;
     }
-    words = ((u32)nfds + 31) / 32;
-    if ((words && rset && (u32)rset < 0x1000) ||
-            (words && wset && (u32)wset < 0x1000) ||
-            (words && eset && (u32)eset < 0x1000) ||
-            (ts && (u32)ts < 0x1000) ||
-            (sigdata && (u32)sigdata < 0x1000)) {
+    words = ((uaddr)nfds + 31) / 32;
+    if ((words && rset && (uaddr)rset < 0x1000) ||
+            (words && wset && (uaddr)wset < 0x1000) ||
+            (words && eset && (uaddr)eset < 0x1000) ||
+            (ts && (uaddr)ts < 0x1000) ||
+            (sigdata && (uaddr)sigdata < 0x1000)) {
         return -EFAULT;
     }
     if (sigdata) {
         u32 *mask;
-        if (sigdata[1] != 8 || (u32)sigdata[0] < 0x1000) {
+        if (sigdata[1] != 8 ||
+                (sigdata[0] && (uaddr)sigdata[0] < 0x1000)) {
             return -EINVAL;
         }
-        mask = (u32 *)sigdata[0];
-        current->blocked_sig = *mask &
-            ~(1u << SIGKILL) & ~(1u << SIGSTOP);
+        if (sigdata[0]) {
+            mask = (u32 *)(uaddr)sigdata[0];
+            current->blocked_sig = *mask &
+                ~(1u << SIGKILL) & ~(1u << SIGSTOP);
+        }
     }
     for (i = 0; i < words; i++) {
         if (rset) {
@@ -3509,7 +3650,14 @@ static int linux_pselect6(struct trap_frame *frame)
         }
     }
     if (ts) {
-        u32 sec = ts[0], nsec = ts[1];
+        u64 sec, nsec;
+#if __SIZEOF_POINTER__ == 8
+        sec = ((u64 *)ts)[0];
+        nsec = ((u64 *)ts)[1];
+#else
+        sec = ts[0];
+        nsec = ts[1];
+#endif
         if (nsec >= 1000000000u) {
             result = -EINVAL;
             goto out;
@@ -3518,7 +3666,7 @@ static int linux_pselect6(struct trap_frame *frame)
             timeout_ticks = 0xffffffffu;
         } else {
             timeout_ticks = sec * TIMER_HZ +
-                nsec / (1000000000u / TIMER_HZ);
+                (u32)nsec / (1000000000u / TIMER_HZ);
             if (nsec && timeout_ticks == 0) {
                 timeout_ticks = 1;
             }
@@ -3529,7 +3677,7 @@ static int linux_pselect6(struct trap_frame *frame)
         int fd, ready = 0;
         net_poll();
         for (fd = 0; fd < nfds; fd++) {
-            u32 word = (u32)fd / 32;
+            u32 word = (uaddr)fd / 32;
             u32 bit = 1u << (fd & 31);
             int wr = rset && (orig_r[word] & bit);
             int ww = wset && (orig_w[word] & bit);
@@ -3581,7 +3729,7 @@ static int linux_dup3(struct trap_frame *frame)
 {
     u32 flags = frame->edx;
     int r;
-    if (flags & ~(u32)O_CLOEXEC || frame->ebx == frame->ecx) {
+    if (flags & ~(uaddr)O_CLOEXEC || frame->ebx == frame->ecx) {
         return -EINVAL;
     }
     r = sys_dup2(frame);
@@ -3598,7 +3746,7 @@ static int linux_llseek(struct trap_frame *frame)
     u32 *result = (u32 *)frame->esi;
     int r;
 
-    if ((u32)result < 0x1000) {
+    if ((uaddr)result < 0x1000) {
         return -EFAULT;
     }
     if ((high != 0 && high != 0xffffffffu) ||
@@ -3612,7 +3760,7 @@ static int linux_llseek(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
-    result[0] = (u32)r;
+    result[0] = (uaddr)r;
     result[1] = 0;
     return 0;
 }
@@ -3626,9 +3774,21 @@ static int linux_faccessat(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
-    frame->ebx = (u32)abs;
+    frame->ebx = (uaddr)abs;
     frame->ecx = frame->edx;
     return sys_access(frame);
+}
+
+static int linux_fchownat(struct trap_frame *frame)
+{
+    char abs[160];
+    int r = linux_abs_from_dir((int)frame->ebx,
+                               (const char *)frame->ecx, abs, sizeof(abs));
+    if (r < 0) return r;
+    frame->ebx = (uaddr)abs;
+    frame->ecx = frame->edx;
+    frame->edx = frame->esi;
+    return sys_chown(frame);
 }
 
 static int linux_readlink_path(const char *path, u8 *buf, u32 count)
@@ -3636,7 +3796,7 @@ static int linux_readlink_path(const char *path, u8 *buf, u32 count)
     struct fs_node *node;
     int r;
 
-    if ((u32)buf < 0x1000) {
+    if ((uaddr)buf < 0x1000) {
         return -EFAULT;
     }
     r = resolve_path_nofollow(path, &node);
@@ -3664,7 +3824,7 @@ static int linux_symlink_path(const char *path, const char *target)
     char abs[256];
     int r;
 
-    if ((u32)target < 0x1000) {
+    if ((uaddr)target < 0x1000) {
         return -EFAULT;
     }
     r = path_absolute(path, abs, sizeof(abs));
@@ -3672,7 +3832,7 @@ static int linux_symlink_path(const char *path, const char *target)
     r = vfs_symlink(abs, target);
     if (r < 0) return r;
     jfs_log(JFS_SYMLINK, abs, 0, 0777, (const u8 *)target,
-            (u32)strlen(target));
+            (uaddr)strlen(target));
     return 0;
 }
 
@@ -3692,14 +3852,14 @@ static int linux_prctl(struct trap_frame *frame)
     char *name = (char *)frame->ecx;
 
     if (option == 15) {
-        if ((u32)name < 0x1000) {
+        if ((uaddr)name < 0x1000) {
             return -EFAULT;
         }
         copy_string(current->name, name, sizeof(current->name));
         return 0;
     }
     if (option == 16) {
-        if ((u32)name < 0x1000) {
+        if ((uaddr)name < 0x1000) {
             return -EFAULT;
         }
         copy_string(name, current->name, sizeof(current->name));
@@ -3717,6 +3877,15 @@ static int linux_utimes(struct trap_frame *frame)
     return sys_access(frame);
 }
 
+static int linux_futimens(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) {
+        return -EBADF;
+    }
+    return 0;
+}
+
 static int linux_utimensat(struct trap_frame *frame)
 {
     const char *path = (const char *)frame->ecx;
@@ -3730,14 +3899,14 @@ static int linux_utimensat(struct trap_frame *frame)
         }
         return 0;
     }
-    if ((u32)path < 0x1000) {
+    if ((uaddr)path < 0x1000) {
         return -EFAULT;
     }
     r = linux_abs_from_dir((int)frame->ebx, path, abs, sizeof(abs));
     if (r < 0) {
         return r;
     }
-    frame->ebx = (u32)abs;
+    frame->ebx = (uaddr)abs;
     frame->ecx = F_OK;
     return sys_access(frame);
 }
@@ -3745,7 +3914,7 @@ static int linux_utimensat(struct trap_frame *frame)
 static int linux_sysinfo(struct trap_frame *frame)
 {
     u32 *info = (u32 *)frame->ebx;
-    if ((u32)info < 0x1000) {
+    if ((uaddr)info < 0x1000) {
         return -EFAULT;
     }
     memset((u8 *)info, 0, 64);
@@ -3760,8 +3929,8 @@ static int linux_sched_getaffinity(struct trap_frame *frame)
 {
     u32 size = frame->ecx;
     u8 *mask = (u8 *)frame->edx;
-    if (size < sizeof(u32) || (u32)mask < 0x1000) {
-        return size < sizeof(u32) ? -EINVAL : -EFAULT;
+    if (size < sizeof(uaddr) || (uaddr)mask < 0x1000) {
+        return size < sizeof(uaddr) ? -EINVAL : -EFAULT;
     }
     memset(mask, 0, size);
     *(u32 *)mask = 1;
@@ -3772,7 +3941,7 @@ static int linux_times(struct trap_frame *frame)
 {
     u32 *tms = (u32 *)frame->ebx;
     if (tms) {
-        if ((u32)tms < 0x1000) {
+        if ((uaddr)tms < 0x1000) {
             return -EFAULT;
         }
         memset((u8 *)tms, 0, 16);
@@ -3783,7 +3952,7 @@ static int linux_times(struct trap_frame *frame)
 static int linux_getrusage(struct trap_frame *frame)
 {
     u32 *usage = (u32 *)frame->ecx;
-    if ((u32)usage < 0x1000) {
+    if ((uaddr)usage < 0x1000) {
         return -EFAULT;
     }
     memset((u8 *)usage, 0, 72);
@@ -3794,7 +3963,7 @@ static int linux_getrlimit(struct trap_frame *frame)
 {
     u32 *old = (u32 *)frame->ecx;
     u32 val = frame->ebx == 7 ? 16 : 64u * 1024u * 1024u;
-    if ((u32)old < 0x1000) {
+    if ((uaddr)old < 0x1000) {
         return -EFAULT;
     }
     old[0] = val;
@@ -3802,18 +3971,170 @@ static int linux_getrlimit(struct trap_frame *frame)
     return 0;
 }
 
+static int sys_getgroups(struct trap_frame *frame);
 static int linux_getgroups(struct trap_frame *frame)
 {
-    int size = (int)frame->ebx;
+    return sys_getgroups(frame);
+}
+
+static int sys_getuid(__UNUSED__ struct trap_frame *frame)
+{
+    return (int)current->uid;
+}
+static int sys_geteuid(__UNUSED__ struct trap_frame *frame)
+{
+    return (int)current->euid;
+}
+static int sys_getgid(__UNUSED__ struct trap_frame *frame)
+{
+    return (int)current->gid;
+}
+static int sys_getegid(__UNUSED__ struct trap_frame *frame)
+{
+    return (int)current->egid;
+}
+
+static int cred_can_set(u32 id)
+{
+    return current->euid == 0 || id == current->uid || id == current->euid ||
+           id == current->suid;
+}
+static int cred_can_set_gid(u32 id)
+{
+    return current->euid == 0 || id == current->gid || id == current->egid ||
+           id == current->sgid;
+}
+
+static int sys_setuid(struct trap_frame *frame)
+{
+    u32 id = frame->ebx;
+    if (!cred_can_set(id)) return -EPERM;
+    if (current->euid == 0) {
+        current->uid = current->euid = current->suid = id;
+    } else {
+        current->euid = id;
+    }
+    return 0;
+}
+static int sys_seteuid(struct trap_frame *frame)
+{
+    u32 id = frame->ebx;
+    if (!cred_can_set(id)) return -EPERM;
+    current->euid = id;
+    return 0;
+}
+static int sys_setgid(struct trap_frame *frame)
+{
+    u32 id = frame->ebx;
+    if (!cred_can_set_gid(id)) return -EPERM;
+    if (current->euid == 0) {
+        current->gid = current->egid = current->sgid = id;
+    } else {
+        current->egid = id;
+    }
+    return 0;
+}
+static int sys_setegid(struct trap_frame *frame)
+{
+    u32 id = frame->ebx;
+    if (!cred_can_set_gid(id)) return -EPERM;
+    current->egid = id;
+    return 0;
+}
+
+static int sys_setresuid(struct trap_frame *frame)
+{
+    u32 uid = frame->ebx, euid = frame->ecx, suid = frame->edx;
+    if (current->euid != 0 &&
+            ((uid != (u32)-1 && !cred_can_set(uid)) ||
+             (euid != (u32)-1 && !cred_can_set(euid)) ||
+             (suid != (u32)-1 && !cred_can_set(suid)))) {
+        return -EPERM;
+    }
+    if (uid != (u32)-1) current->uid = uid;
+    if (euid != (u32)-1) current->euid = euid;
+    if (suid != (u32)-1) current->suid = suid;
+    return 0;
+}
+static int sys_setresgid(struct trap_frame *frame)
+{
+    u32 gid = frame->ebx, egid = frame->ecx, sgid = frame->edx;
+    if (current->euid != 0 &&
+            ((gid != (u32)-1 && !cred_can_set_gid(gid)) ||
+             (egid != (u32)-1 && !cred_can_set_gid(egid)) ||
+             (sgid != (u32)-1 && !cred_can_set_gid(sgid)))) {
+        return -EPERM;
+    }
+    if (gid != (u32)-1) current->gid = gid;
+    if (egid != (u32)-1) current->egid = egid;
+    if (sgid != (u32)-1) current->sgid = sgid;
+    return 0;
+}
+
+static int sys_getgroups(struct trap_frame *frame)
+{
+    u32 size = frame->ebx;
     u32 *groups = (u32 *)frame->ecx;
-    if (size == 0) {
-        return 1;
+    u32 i;
+    if (size == 0) return (int)current->ngroups;
+    if (size < current->ngroups) return -EINVAL;
+    if (current->ngroups && (uaddr)groups < 0x1000) return -EFAULT;
+    for (i = 0; i < current->ngroups; i++) groups[i] = current->groups[i];
+    return (int)current->ngroups;
+}
+static int sys_setgroups(struct trap_frame *frame)
+{
+    u32 size = frame->ebx;
+    u32 *groups = (u32 *)frame->ecx;
+    u32 i;
+    if (current->euid != 0) return -EPERM;
+    if (size > 16 || (size && (uaddr)groups < 0x1000)) return -EINVAL;
+    for (i = 0; i < size; i++) current->groups[i] = groups[i];
+    current->ngroups = size;
+    return 0;
+}
+
+static int cred_update_owner(struct fs_node *node, u32 uid, u32 gid)
+{
+    if (current->euid != 0) return -EPERM;
+    if (!node) return -ENOENT;
+    if (uid > 65535 || gid > 65535) return -EINVAL;
+    if (uid != (u32)-1) node->uid = uid;
+    if (gid != (u32)-1) node->gid = gid;
+    return 0;
+}
+
+static int sys_chown(struct trap_frame *frame)
+{
+    const char *path = (const char *)frame->ebx;
+    u32 uid = frame->ecx, gid = frame->edx;
+    struct fs_node *node;
+    char abs[160];
+    int r = resolve_path(path, &node);
+    if (r < 0) return r;
+    r = cred_update_owner(node, uid, gid);
+    if (r < 0) return r;
+    if (path_normalize(path, abs, sizeof(abs)) == 0) {
+        jfs_log(JFS_CHOWN, abs, 0,
+                (node->uid & 0xffff) | ((node->gid & 0xffff) << 16), 0, 0);
     }
-    if (size < 0 || (u32)groups < 0x1000) {
-        return -EINVAL;
+    return 0;
+}
+static int sys_fchown(struct trap_frame *frame)
+{
+    int fd = (int)frame->ebx;
+    struct file *f;
+    int r;
+    if (fd < 0 || fd >= FD_MAX || !current->fds[fd].used) return -EBADF;
+    f = &current->fds[fd];
+    r = cred_update_owner(f->node, frame->ecx, frame->edx);
+    if (r < 0) return r;
+    if (f->ofd && f->ofd->path[0]) {
+        jfs_log(JFS_CHOWN, f->ofd->path, 0,
+                (f->node->uid & 0xffff) | ((f->node->gid & 0xffff) << 16),
+                0, 0);
     }
-    groups[0] = 0;
-    return 1;
+    return 0;
 }
 
 static int linux_fsync(struct trap_frame *frame)
@@ -3834,18 +4155,243 @@ static int linux_unlinkat(struct trap_frame *frame);
 static int linux_renameat(struct trap_frame *frame);
 static int linux_fchdir(struct trap_frame *frame);
 
+#if __SIZEOF_POINTER__ == 8
+static void linux64_fill_stat(void *output, const struct stat *st)
+{
+    struct arch_linux_stat *out = (struct arch_linux_stat *)output;
+    memset((u8 *)out, 0, sizeof(*out));
+    out->st_ino = st->st_ino;
+    out->st_mode = st->st_mode;
+    out->st_nlink = st->st_nlink;
+    out->st_uid = st->st_uid;
+    out->st_gid = st->st_gid;
+    out->st_rdev = st->st_rdev;
+    out->st_size = st->st_size;
+    out->st_blksize = st->st_blksize;
+    out->st_blocks = st->st_blocks;
+    out->st_atime_sec = st->st_atime;
+    out->st_mtime_sec = st->st_mtime;
+    out->st_ctime_sec = st->st_ctime;
+}
+
+static int linux64_fstat(struct trap_frame *frame)
+{
+    struct stat st;
+    uaddr out = frame->ecx;
+    int r;
+    if (out < 0x1000) return -EFAULT;
+    frame->ecx = (uaddr)&st;
+    r = sys_fstat(frame);
+    if (r >= 0) linux64_fill_stat((void *)out, &st);
+    return r;
+}
+
+static int linux64_stat(struct trap_frame *frame)
+{
+    struct stat st;
+    uaddr out = frame->ecx;
+    int r;
+    if (out < 0x1000) return -EFAULT;
+    frame->ecx = (uaddr)&st;
+    r = sys_stat(frame);
+    if (r >= 0) linux64_fill_stat((void *)out, &st);
+    return r;
+}
+
+static int linux64_newfstatat(struct trap_frame *frame)
+{
+    char abs[256];
+    const char *path = (const char *)frame->ecx;
+    uaddr out = frame->edx;
+    int r;
+    if (path && !*path && frame->ebx < FD_MAX) {
+        frame->ecx = out;
+        return linux64_fstat(frame);
+    }
+    r = linux_abs_from_dir((int)frame->ebx, path, abs, sizeof(abs));
+    if (r < 0) return r;
+    frame->ebx = (uaddr)abs;
+    frame->ecx = out;
+    return linux64_stat(frame);
+}
+
+static int linux64_clock_gettime(struct trap_frame *frame)
+{
+    u64 *ts = (u64 *)frame->ecx;
+    u32 clk = frame->ebx;
+    if ((uaddr)ts < 0x1000) return -EFAULT;
+    if (clk != CLOCK_REALTIME && clk != CLOCK_MONOTONIC) return -EINVAL;
+    ts[0] = tick / TIMER_HZ;
+    ts[1] = (tick % TIMER_HZ) * (1000000000u / TIMER_HZ);
+    return 0;
+}
+
+static int linux64_gettimeofday(struct trap_frame *frame)
+{
+    u64 *tv = (u64 *)frame->ebx;
+    if (!tv) return 0;
+    if ((uaddr)tv < 0x1000) return -EFAULT;
+    tv[0] = tick / TIMER_HZ;
+    tv[1] = (tick % TIMER_HZ) * (1000000u / TIMER_HZ);
+    return 0;
+}
+
+static int linux64_nanosleep(struct trap_frame *frame)
+{
+    u64 *input = (u64 *)frame->ebx;
+    struct timespec req;
+    if ((uaddr)input < 0x1000) return -EFAULT;
+    req.tv_sec = input[0];
+    req.tv_nsec = input[1];
+    frame->ebx = (uaddr)&req;
+    return sys_nanosleep(frame);
+}
+
+static int linux64_getrlimit(struct trap_frame *frame)
+{
+    u64 *old = (u64 *)frame->ecx;
+    u64 val = frame->ebx == 7 ? 16 : 64ULL * 1024 * 1024;
+    if ((uaddr)old < 0x1000) return -EFAULT;
+    old[0] = val;
+    old[1] = val;
+    return 0;
+}
+
+static int linux64_getrusage(struct trap_frame *frame)
+{
+    void *usage = (void *)frame->ecx;
+    if ((uaddr)usage < 0x1000) return -EFAULT;
+    memset((u8 *)usage, 0, 144);
+    return 0;
+}
+
+static int linux64_times(struct trap_frame *frame)
+{
+    u64 *tms = (u64 *)frame->ebx;
+    if (tms) {
+        if ((uaddr)tms < 0x1000) return -EFAULT;
+        memset((u8 *)tms, 0, 32);
+    }
+    return (int)tick;
+}
+
+static int linux64_sysinfo(struct trap_frame *frame)
+{
+    u8 *info = (u8 *)frame->ebx;
+    if ((uaddr)info < 0x1000) return -EFAULT;
+    memset(info, 0, 128);
+    *(u64 *)(info + 0) = tick / TIMER_HZ;
+    *(u64 *)(info + 32) = MEMORY_SIZE;
+    *(u64 *)(info + 40) = MEMORY_SIZE;
+    *(u16 *)(info + 80) = 1;
+    *(u32 *)(info + 104) = 1;
+    return 0;
+}
+
+static int linux64_getresid(struct trap_frame *frame)
+{
+    u32 *values[3];
+    u32 i;
+    values[0] = (u32 *)frame->ebx;
+    values[1] = (u32 *)frame->ecx;
+    values[2] = (u32 *)frame->edx;
+    for (i = 0; i < 3; i++) {
+        if (values[i]) {
+            if ((uaddr)values[i] < 0x1000) return -EFAULT;
+            *values[i] = 0;
+        }
+    }
+    return 0;
+}
+
+static int linux64_sigaltstack(struct trap_frame *frame)
+{
+    u8 *old = (u8 *)frame->ecx;
+    if (!old) return 0;
+    if ((uaddr)old < 0x1000) return -EFAULT;
+    memset(old, 0, 24);
+    *(u32 *)(old + 8) = 2;
+    return 0;
+}
+
+static int linux64_arch_prctl(struct trap_frame *frame)
+{
+    uaddr option = frame->ebx;
+    uaddr value = frame->ecx;
+    if (option == 0x1002) {
+        current->tls = value;
+        arch_set_tls(value);
+        return 0;
+    }
+    if (option == 0x1003) {
+        if (value < 0x1000) return -EFAULT;
+        *(uaddr *)value = arch_get_tls();
+        return 0;
+    }
+    return -EINVAL;
+}
+
+struct linux64_k_sigaction {
+    uaddr handler;
+    uaddr flags;
+    uaddr restorer;
+    u64 mask;
+};
+
+static int linux64_sigaction(struct trap_frame *frame)
+{
+    int sig = (int)frame->ebx;
+    struct linux64_k_sigaction *act = (void *)frame->ecx;
+    struct linux64_k_sigaction *old = (void *)frame->edx;
+    if (sig <= 0 || sig >= NSIG || sig == SIGKILL || sig == SIGSTOP)
+        return -EINVAL;
+    if (old) {
+        if ((uaddr)old < 0x1000) return -EFAULT;
+        old->handler = current->sig_handler[sig];
+        old->flags = 0;
+        old->restorer = current->sig_restorer[sig];
+        old->mask = current->sig_mask[sig];
+    }
+    if (act) {
+        if ((uaddr)act < 0x1000) return -EFAULT;
+        current->sig_handler[sig] = act->handler;
+        current->sig_mask[sig] = act->mask & ~(1u << SIGKILL) &
+            ~(1u << SIGSTOP);
+        current->sig_restorer[sig] = act->restorer;
+    }
+    return 0;
+}
+#endif
+
 static int linux_dispatch(struct trap_frame *frame)
 {
     u32 nr = frame->eax;
 
     switch (nr) {
+#if __SIZEOF_POINTER__ == 8
+    case 504: return linux64_stat(frame);
+    case 505: return linux64_fstat(frame);
+    case 513: return linux64_sigaction(frame);
+    case 535: return linux64_nanosleep(frame);
+    case 543: return linux64_times(frame);
+    case 578: return linux64_gettimeofday(frame);
+    case 597: return linux64_getrlimit(frame);
+    case 598: return linux64_getrusage(frame);
+    case 599: return linux64_sysinfo(frame);
+    case 618: case 620: return linux64_getresid(frame);
+    case 658: return linux64_arch_prctl(frame);
+    case 686: return linux64_sigaltstack(frame);
+    case 728: return linux64_clock_gettime(frame);
+    case 762: return linux64_newfstatat(frame);
+#endif
+    case 29: return sys_pause(frame);
     case 1: case 252: return sys_exit(frame);
     case 2: return sys_fork(frame);
     case 3: {
         int fd = (int)frame->ebx;
         if (fd >= 0 && fd < FD_MAX && current->fds[fd].used &&
                 current->fds[fd].kind == FD_TTY_IN &&
-                (u32)frame->ecx >= 0x1000) {
+                (uaddr)frame->ecx >= 0x1000) {
             return tty_read(current->tty, (u8 *)frame->ecx,
                                   frame->edx);
         }
@@ -3860,7 +4406,14 @@ static int linux_dispatch(struct trap_frame *frame)
     case 13: return sys_time(frame);
     case 19: return sys_lseek(frame);
     case 20: return sys_getpid(frame);
-    case 24: case 47: case 49: case 50: return 0;
+    case 24: return sys_getuid(frame);
+    case 47: return sys_getgid(frame);
+    case 49: return sys_geteuid(frame);
+    case 50: return sys_getegid(frame);
+    case 199: return sys_getuid(frame);
+    case 200: return sys_getgid(frame);
+    case 201: return sys_geteuid(frame);
+    case 202: return sys_getegid(frame);
     case 15: return sys_chmod(frame);
     case 94: return sys_fchmod(frame);
     case 308: return linux_pselect6(frame);
@@ -3874,7 +4427,7 @@ static int linux_dispatch(struct trap_frame *frame)
         if (r < 0) {
             return r;
         }
-        frame->ebx = (u32)abs;
+        frame->ebx = (uaddr)abs;
         frame->ecx = frame->edx;
         return sys_chmod(frame);
     }
@@ -3896,11 +4449,23 @@ static int linux_dispatch(struct trap_frame *frame)
     case 66: return sys_setsid(frame);
     case 55: return sys_fcntl(frame);
     case 60: return 0;          /* umask */
+    case 23: return sys_setuid(frame);
+    case 46: return sys_setgid(frame);
+    case 70: return sys_seteuid(frame);
+    case 71: return sys_setegid(frame);
+    case 164: return sys_setresuid(frame);
+    case 170: return sys_setresgid(frame);
+    case 208: return sys_setresuid(frame);
+    case 210: return sys_setresgid(frame);
+    case 213: return sys_setuid(frame);
+    case 214: return sys_setgid(frame);
     case 75: return 0;          /* setrlimit */
     case 76: return linux_getrlimit(frame);
     case 77: return linux_getrusage(frame);
     case 80: case 205: return linux_getgroups(frame);
-    case 81: case 206: return 0;
+    case 81: case 206: return sys_setgroups(frame);
+    case 95: case 181: case 207: return sys_fchown(frame);
+    case 182: case 212: return sys_chown(frame);
     case 63: return sys_dup2(frame);
     case 64: return sys_getppid(frame);
     case 78: return sys_gettimeofday(frame);
@@ -3933,7 +4498,7 @@ static int linux_dispatch(struct trap_frame *frame)
     case 186: {
         u32 *old = (u32 *)frame->ecx;
         if (old) {
-            if ((u32)old < 0x1000) {
+            if ((uaddr)old < 0x1000) {
                 return -EFAULT;
             }
             old[0] = 0;
@@ -3948,14 +4513,15 @@ static int linux_dispatch(struct trap_frame *frame)
         return r < 0 ? r : (int)strlen(current->cwd) + 1;
     }
     case 192: return linux_mmap2(frame);
-    case 199: case 200: case 201: case 202: return 0;
     case 220: return linux_getdents64(frame);
     case 221: return sys_fcntl(frame);
     case 296: return linux_mkdirat(frame);
     case 299: case 320: return linux_utimensat(frame);
+    case 300: return linux_futimens(frame);
     case 301: return linux_unlinkat(frame);
     case 302: return linux_renameat(frame);
     case 307: case 439: return linux_faccessat(frame);
+    case 309: return linux_fchownat(frame);
     case 224: return (int)current->pid;
     case 242: return linux_sched_getaffinity(frame);
     case 240: {
@@ -3994,7 +4560,7 @@ static int linux_dispatch(struct trap_frame *frame)
 
 static int linux_abs_from_dir(int dirfd, const char *path, char *abs, u32 max)
 {
-    if (!path || (u32)path < 0x1000) {
+    if (!path || (uaddr)path < 0x1000) {
         return -EFAULT;
     }
     if (path[0] == '/' || dirfd == (int)LINUX_AT_FDCWD) {
@@ -4004,8 +4570,8 @@ static int linux_abs_from_dir(int dirfd, const char *path, char *abs, u32 max)
             current->fds[dirfd].ofd &&
             current->fds[dirfd].ofd->path[0]) {
         const char *base = current->fds[dirfd].ofd->path;
-        u32 bl = (u32)strlen(base);
-        u32 pl = (u32)strlen(path);
+        u32 bl = (uaddr)strlen(base);
+        u32 pl = (uaddr)strlen(path);
         if (bl + pl + 2 > max) {
             return -ERANGE;
         }
@@ -4025,7 +4591,7 @@ static int linux_mkdirat(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
-    frame->ebx = (u32)abs;
+    frame->ebx = (uaddr)abs;
     frame->ecx = frame->edx;
     return sys_mkdir(frame);
 }
@@ -4038,7 +4604,7 @@ static int linux_unlinkat(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
-    frame->ebx = (u32)abs;
+    frame->ebx = (uaddr)abs;
     if (frame->edx & LINUX_AT_REMOVEDIR) {
         return sys_rmdir(frame);
     }
@@ -4058,8 +4624,8 @@ static int linux_renameat(struct trap_frame *frame)
     if (r < 0) {
         return r;
     }
-    frame->ebx = (u32)a;
-    frame->ecx = (u32)b;
+    frame->ebx = (uaddr)a;
+    frame->ecx = (uaddr)b;
     return sys_rename(frame);
 }
 
@@ -4182,11 +4748,15 @@ static int linux_syscall_handler(struct trap_frame *frame)
 
 void syscall_handler(struct trap_frame *frame)
 {
-    u32 ret;
+    int ret;
     sysc_func func = 0;
 
     if (current->linux_abi) {
-        frame->eax = (u32)linux_syscall_handler(frame);
+        int ret;
+        extern reg_t arch_linux_syscall_number(reg_t nr);
+        frame->eax = arch_linux_syscall_number(frame->eax);
+        ret = linux_syscall_handler(frame);
+        frame->eax = (reg_t)(s64)ret;
         return;
     }
     // Check if the requested syscall number is valid.

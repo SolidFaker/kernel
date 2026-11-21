@@ -46,6 +46,37 @@ struct elf_section_header {
 }__attribute__((packed));
 typedef struct elf_section_header elf_section_header_t;
 
+struct elf64_header {
+    u32 magic;
+    u8 elf[12];
+    u16 type;
+    u16 machine;
+    u32 version;
+    u64 entry;
+    u64 phoff;
+    u64 shoff;
+    u32 flags;
+    u16 ehsize;
+    u16 phentsize;
+    u16 phnum;
+    u16 shentsize;
+    u16 shnum;
+    u16 shstrndx;
+} __attribute__((packed));
+typedef struct elf64_header elf64_header_t;
+
+struct elf64_program_header {
+    u32 type;
+    u32 flags;
+    u64 off;
+    u64 vaddr;
+    u64 paddr;
+    u64 filesz;
+    u64 memsz;
+    u64 align;
+} __attribute__((packed));
+typedef struct elf64_program_header elf64_program_header_t;
+
 void *disk_read_elf(struct elf_header *header, u32 header_offset);
 
 #endif

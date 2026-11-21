@@ -6,6 +6,7 @@
 #include "errno.h"
 #include "mm.h"
 #include "string.h"
+#include "task.h"
 
 struct ramfs_inode {
     struct fs_node node;
@@ -162,6 +163,8 @@ static void ri_init_node(struct ramfs_inode *ri, const char *name,
     strcpy(ri->node.name, (char *)name);
     ri->node.inode = ramfs_next_ino++;
     ri->node.mask = is_dir ? 0755 : 0644;
+    ri->node.uid = current ? current->euid : 0;
+    ri->node.gid = current ? current->egid : 0;
     ri->parent = parent;
     if (is_dir) {
         ri->node.flags = FS_DIRECTORY;

@@ -2,7 +2,7 @@
 
 ## e1000
 
-`drivers/net.c` drives QEMU's e1000:
+`arch/x86/drivers/net.c` drives QEMU's e1000:
 
 - PCI scan for `8086:100E/100F`, MMIO BAR mapped at `0xC8000000`
 - bus mastering + memory space enabled
@@ -29,7 +29,7 @@ Guest address: `10.0.2.15/24`, gateway: `10.0.2.2`.
 
 ## TCP client
 
-Minimal client in `fs/socket.c` + `drivers/net.c`:
+Minimal client in `fs/socket.c` + `arch/x86/drivers/net.c`:
 
 - active open (SYN/SYN-ACK/ACK), sequence/ack tracking
 - PSH data send with ACK wait

@@ -14,9 +14,9 @@ static u16 tty_cells[TTY_NUMBER][TTY_COLS * TTY_ROWS];
 void init_tty()
 {
     u8 i;
-    u32 j;
 
     for (i = 0; i < TTY_NUMBER; i++) {
+        volatile u8 *cc = tty[i].termios.c_cc;
         tty[i].offset = 0;
         tty[i].buffer = tty_cells[i];
         tty[i].cursor_x = 0;
@@ -25,23 +25,27 @@ void init_tty()
         tty[i].termios.c_iflag = ICRNL;
         tty[i].termios.c_oflag = OPOST;
         tty[i].termios.c_lflag = ISIG | ICANON | ECHO | ECHOE;
-        tty[i].termios.c_cc[VINTR] = 3;
-        tty[i].termios.c_cc[VQUIT] = 28;
-        tty[i].termios.c_cc[VERASE] = 8;
-        tty[i].termios.c_cc[VKILL] = 21;
-        tty[i].termios.c_cc[VEOF] = 4;
-        tty[i].termios.c_cc[VSTART] = 17;
-        tty[i].termios.c_cc[VSTOP] = 19;
-        tty[i].termios.c_cc[VSUSP] = 26;
-        tty[i].termios.c_cc[VMIN] = 1;
-        tty[i].termios.c_cc[VTIME] = 0;
-        tty[i].termios.c_ispeed = 38400;
-        tty[i].termios.c_ospeed = 38400;
+        cc[VINTR] = 3;
+        cc[VQUIT] = 28;
+        cc[VERASE] = 8;
+        cc[VKILL] = 21;
+        cc[VEOF] = 4;
+        cc[VSTART] = 17;
+        cc[VSTOP] = 19;
+        cc[VSUSP] = 26;
+        cc[VMIN] = 1;
+        cc[VTIME] = 0;
+        *(volatile u32 *)&tty[i].termios.c_ispeed = 38400;
+        *(volatile u32 *)&tty[i].termios.c_ospeed = 38400;
         tty[i].pgrp = 0;
         tty[i].in_len = 0;
         tty[i].in_pos = 0;
-        for (j = 0; j < TTY_COLS * TTY_ROWS; j++) {
-            tty[i].buffer[j] = 0x20 | (0x07 << 8);
+        {
+            volatile u16 *cells = tty[i].buffer;
+            int remaining = TTY_COLS * TTY_ROWS;
+            while (remaining-- > 0) {
+                *cells++ = 0x20 | (0x07 << 8);
+            }
         }
     }
 

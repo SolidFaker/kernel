@@ -7,12 +7,15 @@
 #include "signal.h"
 #include "drivers/timer.h"
 #include "syscall.h"
+#include "arch/user.h"
 
-extern void enter_user_mode();
+extern void enter_user_mode(struct trap_frame *frame);
 u32 pid_now = 0;
+u8 kernel_irq_stack[KERNEL_STACK_SIZE];
 
 struct task_list *running_task_head = NULL;
 struct task_struct *current = NULL;
+uaddr user_stack_entry = 0;
 
 // Install fd 0/1/2 on the keyboard and the task's tty.
 void fds_init_std(struct task_struct *task)
@@ -26,6 +29,30 @@ void fds_init_std(struct task_struct *task)
     task->fds[0].ofd = ofd_alloc();
     task->fds[1].ofd = ofd_alloc();
     task->fds[2].ofd = ofd_alloc();
+}
+
+static void task_credentials_init(struct task_struct *task)
+{
+    task->uid = task->euid = task->suid = 0;
+    task->gid = task->egid = task->sgid = 0;
+    task->ngroups = 1;
+    task->groups[0] = 0;
+}
+
+static void task_credentials_copy(struct task_struct *dst,
+                                  const struct task_struct *src)
+{
+    u32 i;
+    dst->uid = src->uid;
+    dst->euid = src->euid;
+    dst->gid = src->gid;
+    dst->egid = src->egid;
+    dst->suid = src->suid;
+    dst->sgid = src->sgid;
+    dst->ngroups = src->ngroups;
+    for (i = 0; i < src->ngroups && i < 16; i++) {
+        dst->groups[i] = src->groups[i];
+    }
 }
 
 // System idle task
@@ -43,37 +70,58 @@ u32 task_idle(__UNUSED__ void *arg)
 // A successful exec replaces this task, so this code never runs again.
 u32 task_init(__UNUSED__ void *arg)
 {
-#ifdef AUTO_DEMO
+#if defined(AUTO_POSTEST)
+    static const char *native_argv[] = { "postest.elf", 0 };
+#elif defined(AUTO_NATIVE)
+    static const char *bash_argv[] = {
+        "bash", "--norc", "-c", "postest.elf; libctest.elf; exit", 0
+    };
+#elif defined(AUTO_SMOKE)
+    static const char *bash_argv[] = {
+        "bash", "--norc", "-c", "echo NATIVE_SCRIPT_OK; ls /; echo COREUTILS_OK; exit", 0
+    };
+#elif defined(AUTO_DEMO)
     static const char *bash_argv[] = {
         "bash", "--norc", "/system/share/tests/posix-test.sh", 0
+    };
+#elif defined(AUTO_MULTI)
+    static const char *bash_argv[] = {
+        "bash", "--norc", "/system/share/tests/users-test.sh", 0
     };
 #else
     static const char *bash_argv[] = {
         "bash", "--norc", "-i", 0
     };
 #endif
+#if !defined(AUTO_POSTEST)
     static const char *toy_argv[] = {
         "toybox", "sh", "-i", 0
     };
+#endif
     static const char *toy_envp[] = {
         "PATH=/system/bin:/profiles/users/root/bin",
         "HOME=/home/root", "TERM=linux", "USER=root",
         "LOGNAME=root", "SHELL=/system/bin/bash", 0
     };
 
-    asm volatile ("movl %0, %%ebp"::"r"((u32)current->user_stack));
-    asm volatile ("movl %0, %%esp"::"r"((u32)current->user_stack + USER_STACK_SIZE));
+    struct trap_frame *frame = (struct trap_frame *)current->kernel_stack;
 
-    switch_to_user_mode();
-    if (execve("/system/bin/bash", (char *const *)bash_argv,
-               (char *const *)toy_envp) < 0 &&
-            execve("/system/bin/toybox.elf", (char *const *)toy_argv,
-                   (char *const *)toy_envp) < 0) {
-        execve("/system/bin/shell.elf", 0, 0);
-        print_str("shell exec failed\n");
-        exit(1);
+#if defined(AUTO_POSTEST)
+    if (kernel_execve("/system/bin/postest.elf", (char *const *)native_argv,
+                      (char *const *)toy_envp, frame) < 0)
+#else
+    if (kernel_execve("/system/bin/bash", (char *const *)bash_argv,
+                      (char *const *)toy_envp, frame) < 0 &&
+            kernel_execve("/system/bin/toybox.elf", (char *const *)toy_argv,
+                          (char *const *)toy_envp, frame) < 0 &&
+            kernel_execve("/system/bin/shell.elf", 0, 0, frame) < 0)
+#endif
+    {
+        printk("shell exec failed\n");
+        for (;;) hlt();
     }
-    return 0;  // not reached
+    enter_user_mode(frame);
+    return 0;
 }
 
 void init_task()
@@ -82,6 +130,10 @@ void init_task()
     // current is kernel thread
     current = (struct task_struct *)kmalloc(sizeof(struct task_struct));
     current->context = (struct task_context *)kmalloc(sizeof(struct task_context));
+    memset((u8 *)current->context, 0, sizeof(struct task_context));
+    current->context->kernel_sp = (uaddr)kernel_irq_stack + KERNEL_STACK_SIZE;
+    current->context->svc_sp = (uaddr)kernel_stack + KERNEL_STACK_SIZE;
+    current->interrupt_stack = kernel_irq_stack;
 
     current->state = RUNNABLE;
     current->kernel_stack = &kernel_stack;
@@ -92,12 +144,15 @@ void init_task()
     current->tgid = current->pid;
     current->is_thread = 0;
     current->linux_abi = 0;
+    current->tls_entry = GDT_TLS_FIRST;
+    current->tls = 0;
     signal_init_task(current);
     current->mm = NULL;       // do not need this for kernel
     current->mmap_base = MMAP_BASE;
     current->user_stack = NULL;
     current->parent = NULL;
     current->flags = 0;
+    task_credentials_init(current);
     current->tty = tty_cur;
     current->cwd[0] = '/';
     current->cwd[1] = '\0';
@@ -147,16 +202,31 @@ void switch_to(struct task_struct *next)
 {
     if (current != next) {
         struct task_struct *prev = current;
+        prev->tls = arch_get_tls_entry(prev->tls_entry);
+#ifdef DEBUG_E9
+        printk("switch %s -> %s\n", prev->name, next->name);
+#endif
         current = next;
+        arch_set_tls_entry(next->tls_entry, next->tls);
         tty_print = next->tty;
         // Change our kernel stack over.
-        set_kernel_stack((u32)next->kernel_stack+KERNEL_STACK_SIZE);
+        set_kernel_stack((uaddr)next->kernel_stack+KERNEL_STACK_SIZE);
         // switch address space if the tasks do not share one
-        u32 next_pdt = next->mm ? next->mm->pdt_phys : kernel_pdt_phys();
-        u32 prev_pdt = prev->mm ? prev->mm->pdt_phys : kernel_pdt_phys();
+        uaddr next_pdt = next->mm ? next->mm->pdt_phys : kernel_pdt_phys();
+        uaddr prev_pdt = prev->mm ? prev->mm->pdt_phys : kernel_pdt_phys();
         if (next_pdt != prev_pdt) {
             switch_pdt(next_pdt);
         }
+#ifdef DEBUG_E9
+        if (next->pid >= 4)
+            printk("switch child ctxpc=%x framepc=%x sp=%x cs=%x flags=%x usp=%x\n",
+                   next->context->eip,
+                   next->frame ? next->frame->eip : 0,
+                   next->context->esp,
+                   next->frame ? next->frame->cs : 0,
+                   next->frame ? next->frame->eflags : 0,
+                   next->frame ? next->frame->useresp : 0);
+#endif
         switch_task(prev->context, current->context);
     }
 }
@@ -170,10 +240,10 @@ struct task_struct *alloc_task()
         (struct task_context *)kmalloc(sizeof(struct task_context));
     memset((u8 *)new_task->context, 0, sizeof(struct task_context));
     u8 *kstack = (u8 *)kmalloc(KERNEL_STACK_SIZE);
+    u8 *irqstack = (u8 *)kmalloc(KERNEL_STACK_SIZE);
     u8 *pstack = (u8 *)kmalloc(USER_STACK_SIZE);
-    assert(kstack != NULL && pstack != NULL, "kern_thread: kmalloc error");
-    // the user stack is the only kernel heap memory CPL3 code must reach
-    kmem_mark_user(pstack, USER_STACK_SIZE);
+    assert(kstack != NULL && irqstack != NULL && pstack != NULL,
+           "kern_thread: kmalloc error");
 
     new_task->state = NEW;
     new_task->priority = current->priority;
@@ -190,12 +260,16 @@ struct task_struct *alloc_task()
         new_task->name[k] = '\0';
     }
     new_task->kernel_stack = kstack;
+    new_task->interrupt_stack = irqstack;
     new_task->user_stack = pstack;
     new_task->parent = current;
     new_task->pid = pid_now++;
     new_task->tgid = new_task->pid;
     new_task->is_thread = 0;
     new_task->linux_abi = current->linux_abi;
+    task_credentials_copy(new_task, current);
+    new_task->tls_entry = current->tls_entry;
+    new_task->tls = arch_get_tls_entry(current->tls_entry);
     new_task->mm = NULL;
     new_task->tty = current->tty;
     // POSIX-style: the child inherits the parent's open descriptors
@@ -218,8 +292,10 @@ struct task_struct *alloc_task()
         }
     }
 
-    new_task->context->esp = (u32)((u32)kstack + KERNEL_STACK_SIZE);
-    new_task->context->ebp = (u32)kstack;
+    new_task->context->esp = (uaddr)((uaddr)kstack + KERNEL_STACK_SIZE);
+    new_task->context->ebp = (uaddr)kstack;
+    new_task->context->svc_sp = new_task->context->esp;
+    new_task->context->kernel_sp = (uaddr)irqstack + KERNEL_STACK_SIZE;
     // let task's eflags = 0x2000 (enable interrupt)
     new_task->context->eflags = 0x200;
 
@@ -255,34 +331,24 @@ u32 kthread_start(const char *name, u32 (*fn)(void *), struct tty *tty,
     new_task->mm = NULL;
     new_task->tty = tty;
 
-    u32 *stack_top = (u32 *)((u32)new_task->kernel_stack + KERNEL_STACK_SIZE);
-    *(--stack_top) = (u32)arg;
-    *(--stack_top) = (u32)kthread_exit;
-    /**(--stack_top) = (u32)fn;*/
+    reg_t *stack_top = (reg_t *)((uaddr)new_task->kernel_stack + KERNEL_STACK_SIZE);
+    *(--stack_top) = (uaddr)arg;
+    *(--stack_top) = (uaddr)kthread_exit;
+    /**(--stack_top) = (uaddr)fn;*/
 
-    new_task->context->esp = (u32)stack_top;
-    new_task->context->eip = (u32)fn;
+    new_task->context->esp = arch_kthread_sp(stack_top);
+    new_task->context->svc_sp = new_task->context->esp;
+    arch_set_kthread(new_task->context, (uaddr)fn, (uaddr)arg);
 
     new_task->state = RUNNABLE;
     return new_task->pid;
 }
 
 void kthread_exit(){
-    u32 val;
-    // grab the return value before printk clobbers %eax
-    asm volatile ("movl %%eax, %0\n" :"=m"(val));
+    reg_t val = arch_get_return_value();
     // never schedule this task again
     current->state = ZOMBIE;
     printk("%s exited with value 0x%x\n", current->name, val);
 
     while(1) hlt();
-}
-
-void switch_to_user_mode()
-{
-    // Set up our kernel stack.
-    set_kernel_stack((u32)(current->kernel_stack)+KERNEL_STACK_SIZE);
-
-    // Set up a stack structure for switching to user mode.
-    enter_user_mode();
 }

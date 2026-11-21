@@ -87,6 +87,20 @@
 #define NR_ping          79
 #define NR_chmod         80
 #define NR_fchmod        81
+#define NR_getuid        82
+#define NR_geteuid       83
+#define NR_getgid        84
+#define NR_getegid       85
+#define NR_setuid        86
+#define NR_setgid        87
+#define NR_seteuid       88
+#define NR_setegid       89
+#define NR_getgroups     90
+#define NR_setgroups     91
+#define NR_chown         92
+#define NR_fchown        93
+#define NR_setresuid     94
+#define NR_setresgid     95
 
 /* open() flags shared with the Linux i386 ABI. */
 #define O_RDONLY 0

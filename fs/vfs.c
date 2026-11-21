@@ -109,6 +109,10 @@ int vfs_resolve(const char *path, struct fs_node **out, int follow_final)
             if (!cur || (cur->flags & 0x7) != FS_DIRECTORY) {
                 return -ENOTDIR;
             }
+            {
+                int perm = fs_permission(cur, X_OK);
+                if (perm < 0) return perm;
+            }
             child = finddir_fs(cur, name);
             if (!child) {
                 return -ENOENT;
@@ -275,13 +279,16 @@ static int vfs_create_base_tree(void)
         "/store/system-profiles/0/share/tests",
         "/store/system-profiles/0/share/doc", "/profiles/users/root/bin",
         "/profiles/apps", "/config/system", "/config/users/root",
-        "/state/system", "/state/users/root", "/log/system",
-        "/log/users/root", "/cache/system", "/cache/users/root",
-        "/home/root", "/run", "/tmp", "/mounts", "/dev", "/proc", "/sys"
+        "/state/system", "/state/users/root", "/state/users/alice",
+        "/log/system", "/log/users/root", "/log/users/alice",
+        "/cache/system", "/cache/users/root", "/cache/users/alice",
+        "/profiles/users/alice/bin", "/config/users/alice",
+        "/home/root", "/home/alice", "/run", "/tmp", "/mounts", "/dev", "/proc", "/sys"
     };
     static const char *const special[] = {
         "/home/root", "/config/users/root", "/state/users/root",
-        "/log/users/root", "/cache/users/root"
+        "/log/users/root", "/cache/users/root", "/home/alice",
+        "/state/users/alice", "/log/users/alice", "/cache/users/alice"
     };
     u32 i;
     int r;
@@ -368,6 +375,37 @@ static int vfs_write_file(const char *path, const u8 *data, u32 size, u32 mode)
     return 0;
 }
 
+static void vfs_set_owner(const char *path, u32 uid, u32 gid)
+{
+    struct fs_node *node;
+    if (vfs_resolve(path, &node, 1) == 0) {
+        node->uid = uid;
+        node->gid = gid;
+    }
+}
+
+static void vfs_init_users(void)
+{
+    static const char root_record[] =
+        "name=root\nuid=0\ngid=0\nhome=/home/root\nshell=/system/bin/bash\n";
+    static const char alice_record[] =
+        "name=alice\nuid=1000\ngid=1000\nhome=/home/alice\nshell=/system/bin/bash\n";
+    struct fs_node *node;
+
+    if (vfs_resolve("/config/users/root/user", &node, 1) < 0) {
+        vfs_write_file("/config/users/root/user", (const u8 *)root_record,
+                       sizeof(root_record) - 1, 0644);
+    }
+    if (vfs_resolve("/config/users/alice/user", &node, 1) < 0) {
+        vfs_write_file("/config/users/alice/user", (const u8 *)alice_record,
+                       sizeof(alice_record) - 1, 0644);
+    }
+    vfs_set_owner("/home/alice", 1000, 1000);
+    vfs_set_owner("/state/users/alice", 1000, 1000);
+    vfs_set_owner("/log/users/alice", 1000, 1000);
+    vfs_set_owner("/cache/users/alice", 1000, 1000);
+}
+
 static void vfs_expose(const char *profile_dir, const char *name,
                        const char *target, int user_visible)
 {
@@ -410,6 +448,7 @@ static int vfs_make_package(const char *name, const char *version, u32 crc,
 }
 
 static char coreutils_package[256];
+static char userctl_package[256];
 
 static int vfs_has_prefix(const u8 *data, u32 size, const char *prefix)
 {
@@ -463,7 +502,8 @@ static int vfs_import_entry(struct myfs_entry *ent)
         package = "bash"; version = "5.2.37"; output = "bash";
     } else if (!strcmp(name, "coreutils.elf")) {
         package = "coreutils"; version = "9.5"; output = "coreutils";
-    } else if (!strcmp(name, "posix-test.sh")) {
+    } else if (!strcmp(name, "posix-test.sh") ||
+               !strcmp(name, "users-test.sh")) {
         package = "posix-tests"; version = "1"; subdir = "share/tests";
         mode = 0644; user_visible = 0;
     } else if (!strcmp(name, "README")) {
@@ -487,6 +527,8 @@ static int vfs_import_entry(struct myfs_entry *ent)
     }
     if (!strcmp(package, "coreutils")) {
         strcpy(coreutils_package, pkg);
+    } else if (!strcmp(package, "userctl")) {
+        strcpy(userctl_package, pkg);
     }
     r = path_join(path, sizeof(path), pkg, subdir);
     if (r == 0) r = path_join(path, sizeof(path), path, output);
@@ -503,6 +545,17 @@ static int vfs_import_entry(struct myfs_entry *ent)
     }
     kfree(data);
     return r;
+}
+
+static void vfs_replace_symlink(const char *path, const char *target)
+{
+    struct fs_node *node, *parent;
+    char name[128];
+    if (vfs_resolve(path, &node, 0) == 0 &&
+            vfs_parent(path, &parent, name) == 0) {
+        unlink_fs(parent, name);
+    }
+    vfs_symlink(path, target);
 }
 
 void vfs_import_myfs(void)
@@ -542,6 +595,22 @@ void vfs_import_myfs(void)
     vfs_symlink("/store/system-profiles/0/bin/sh", "bash");
     vfs_symlink("/profiles/users/root/bin/sh",
                 "/store/system-profiles/0/bin/bash");
+    if (userctl_package[0]) {
+        static const char *const commands[] = {
+            "login", "su", "adduser", "id", "whoami"
+        };
+        char target[256], link[256];
+        u32 i;
+        path_join(target, sizeof(target), userctl_package, "bin/userctl.elf");
+        for (i = 0; i < sizeof(commands) / sizeof(commands[0]); i++) {
+            path_join(link, sizeof(link), "/store/system-profiles/0/bin",
+                      commands[i]);
+            vfs_replace_symlink(link, target);
+            path_join(link, sizeof(link), "/profiles/users/root/bin",
+                      commands[i]);
+            vfs_replace_symlink(link, target);
+        }
+    }
 }
 
 static void vfs_mark_tree(struct fs_node *node, u32 flag)
@@ -574,6 +643,7 @@ struct fs_node *init_vfs()
     if (!init_vfs_empty()) {
         return 0;
     }
+    vfs_init_users();
     vfs_import_myfs();
     return fs_root;
 }

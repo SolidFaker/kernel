@@ -1,3 +1,6 @@
+ARCH ?= x86
+ARCH_DIR = arch/$(ARCH)
+
 AS = i686-elf-as
 AR = i686-elf-ar
 CC = i686-elf-gcc
@@ -5,7 +8,7 @@ LD = i686-elf-ld
 HOSTCC ?= cc
 PYTHON ?= python3
 
-INCLUDE = -I./include
+INCLUDE = -I./include -I./$(ARCH_DIR)/include
 BUILD   = build
 OBJ     = $(BUILD)/obj
 BIN     = $(BUILD)/bin
@@ -18,14 +21,14 @@ BOOT_BIN   = $(BIN)/boot.bin
 LIBC_A     = $(BUILD)/libc.a
 MKFS       = $(BUILD)/mkfs_kernel
 
-KNL_CSRC = $(shell find drivers fs init kernel mm -name "*.c")
-KNL_SSRC = $(shell find kernel -name "*.s")
+KNL_CSRC = $(filter-out kernel/arch_entry.c,$(shell find drivers fs kernel mm $(ARCH_DIR)/kernel $(ARCH_DIR)/mm $(ARCH_DIR)/drivers -name "*.c"))
+KNL_SSRC = $(shell find kernel $(ARCH_DIR)/kernel -name "*.s")
 KNL_COBJ = $(patsubst %.c, $(OBJ)/%.o, $(KNL_CSRC))
 KNL_SOBJ = $(patsubst %.s, $(OBJ)/%.o, $(KNL_SSRC))
 
-KNL_LD = tools/kernel_link.ld
-BTL_LD = tools/loader_link.ld
-USER_LD = tools/user_link.ld
+KNL_LD = $(ARCH_DIR)/kernel_link.ld
+BTL_LD = $(ARCH_DIR)/loader_link.ld
+USER_LD = $(ARCH_DIR)/user_link.ld
 
 GCFLAGS = -c -g -Os -m32 -ffreestanding -Wall -Werror -fno-pie
 GCFLAGS += $(INCLUDE) -fno-stack-protector
@@ -45,13 +48,13 @@ KNL_LDFLAGS = -static -nostdlib --nmagic -melf_i386
 BTL_LDFLAGS = -static -nostdlib --nmagic --oformat=binary -melf_i386
 USER_LDFLAGS = -static -nostdlib --nmagic -melf_i386
 
-BTL_OBJ = $(OBJ)/boot/loaderasm.o $(OBJ)/boot/loadermain.o $(OBJ)/drivers/hd.o
-BTL_OBJ += $(OBJ)/kernel/string.o $(OBJ)/kernel/elf.o
+BTL_OBJ = $(OBJ)/$(ARCH_DIR)/boot/loaderasm.o $(OBJ)/$(ARCH_DIR)/boot/loadermain.o
+BTL_OBJ += $(OBJ)/$(ARCH_DIR)/drivers/hd.o $(OBJ)/kernel/string.o $(OBJ)/kernel/elf.o
 
 USER_SIMPLE = hello shell gfx postest toyrun
 USER_OBJ = $(addprefix $(OBJ)/user/, $(addsuffix .o, $(USER_SIMPLE)))
 USER_ELFS = $(addprefix $(BIN)/, $(addsuffix .elf, $(USER_SIMPLE)))
-USER_ELFS += $(BIN)/libctest.elf $(BIN)/nettest.elf
+USER_ELFS += $(BIN)/libctest.elf $(BIN)/nettest.elf $(BIN)/userctl.elf
 USER_ELFS += $(BIN)/hello_musl.elf $(BIN)/toybox.elf
 USER_ELFS += $(BIN)/bash.elf $(BIN)/coreutils.elf
 
@@ -68,10 +71,6 @@ all: clean $(BOOT_BIN) $(LOADER_BIN) $(KERNEL_ELF) $(USER_ELFS) dd
 
 clean:
 	rm -rf $(BUILD)
-	rm -f kernel.img mkfs_kernel libc.a kernel.map 80m.img floppy.img
-	rm -rf bin
-	rm -f boot/*.o drivers/*.o fs/*.o init/*.o kernel/*.o mm/*.o
-	rm -f user/*.o user/libc/*.o user/*.elf
 	mkdir -p $(OBJ) $(BIN)
 
 $(OBJ)/%.o: %.c
@@ -90,7 +89,7 @@ $(LOADER_BIN): $(BTL_OBJ)
 	@mkdir -p $(@D)
 	$(LD) -T$(BTL_LD) $(BTL_LDFLAGS) $(BTL_OBJ) -o $@
 
-$(BOOT_BIN): $(OBJ)/boot/boot.o
+$(BOOT_BIN): $(OBJ)/$(ARCH_DIR)/boot/boot.o
 	@mkdir -p $(@D)
 	$(LD) -Ttext 0x7c00 --oformat=binary $< -o $@
 
@@ -120,6 +119,10 @@ $(OBJ)/user/nettest.o: user/nettest.c
 	@mkdir -p $(@D)
 	$(CC) $(LIBCFLAGS) -c $< -o $@
 
+$(OBJ)/user/userctl.o: user/userctl.c
+	@mkdir -p $(@D)
+	$(CC) $(LIBCFLAGS) -c $< -o $@
+
 $(BIN)/%.elf: $(OBJ)/user/%.o $(USER_LD)
 	@mkdir -p $(@D)
 	$(LD) -T$(USER_LD) $(USER_LDFLAGS) $< -o $@
@@ -133,6 +136,11 @@ $(BIN)/nettest.elf: $(OBJ)/user/nettest.o $(OBJ)/user/libc/crt0.o $(LIBC_A) $(US
 	@mkdir -p $(@D)
 	$(LD) -T$(USER_LD) $(USER_LDFLAGS) \
 		$(OBJ)/user/libc/crt0.o $(OBJ)/user/nettest.o $(LIBC_A) -o $@
+
+$(BIN)/userctl.elf: $(OBJ)/user/userctl.o $(OBJ)/user/libc/crt0.o $(LIBC_A) $(USER_LD)
+	@mkdir -p $(@D)
+	$(LD) -T$(USER_LD) $(USER_LDFLAGS) \
+		$(OBJ)/user/libc/crt0.o $(OBJ)/user/userctl.o $(LIBC_A) -o $@
 
 $(BIN)/hello_musl.elf: user/hello_musl.c $(MUSL_DIR)/lib/libc.a
 	@mkdir -p $(@D)
@@ -163,10 +171,12 @@ $(KERNEL_IMG): $(MKFS) $(LOADER_BIN) $(KERNEL_ELF) $(USER_ELFS) $(COREUTILS_BUIL
 		$(BIN)/hello.elf hello.elf $(BIN)/shell.elf shell.elf \
 		$(BIN)/gfx.elf gfx.elf $(BIN)/postest.elf postest.elf \
 		$(BIN)/libctest.elf libctest.elf $(BIN)/nettest.elf nettest.elf \
+		$(BIN)/userctl.elf userctl.elf \
 		$(BIN)/hello_musl.elf hello_musl.elf $(BIN)/toybox.elf toybox.elf \
 		$(BIN)/toyrun.elf toyrun.elf $(BIN)/bash.elf bash.elf \
 		$(BIN)/coreutils.elf coreutils.elf ./README.md README \
-		./user/posix-test.sh posix-test.sh; \
+		./user/posix-test.sh posix-test.sh \
+		./user/users-test.sh users-test.sh; \
 	for name in $$(awk -F'"' '/^SINGLE_BINARY_PROGRAM/ {print $$2}' $(COREUTILS_BUILD)/src/coreutils.h); do \
 		wrapper=$(BUILD)/posix-bin/$$name; entry=$$name; \
 		if test "$$name" = ginstall; then entry=install; fi; \
@@ -190,3 +200,9 @@ test: $(DISKIMG)
 
 test64: $(DISKIMG)
 	$(QEMU64) $(QEMUFLAGS)
+
+.PHONY: aarch64-boot x86_64-boot
+aarch64-boot:
+	bash build-arch.sh aarch64
+x86_64-boot:
+	bash build-arch.sh x86_64

@@ -15,25 +15,18 @@
 #include <sys/socket.h>
 #include <poll.h>
 #include <sys/select.h>
+#include <arch/user.h>
 
 int errno;
 
-static int sys3(int nr, int a, int b, int c)
+static reg_t sys3(reg_t nr, reg_t a, reg_t b, reg_t c)
 {
-    int r;
-    __asm__ volatile("int $0x80" : "=a" (r)
-                     : "0" (nr), "b" (a), "c" (b), "d" (c)
-                     : "memory");
-    return r;
+    return arch_syscall3(nr, a, b, c);
 }
 
-static int sys4(int nr, int a, int b, int c, int d)
+static reg_t sys4(reg_t nr, reg_t a, reg_t b, reg_t c, reg_t d)
 {
-    int r;
-    __asm__ volatile("int $0x80" : "=a" (r)
-                     : "0" (nr), "b" (a), "c" (b), "d" (c), "S" (d)
-                     : "memory");
-    return r;
+    return arch_syscall4(nr, a, b, c, d);
 }
 
 static int chk(int r)
@@ -47,12 +40,12 @@ static int chk(int r)
 
 ssize_t read(int fd, void *buf, size_t count)
 {
-    return chk(sys3(NR_read, fd, (int)buf, (int)count));
+    return chk(sys3(NR_read, fd, (uaddr)buf, (uaddr)count));
 }
 
 ssize_t write(int fd, const void *buf, size_t count)
 {
-    return chk(sys3(NR_write, fd, (int)buf, (int)count));
+    return chk(sys3(NR_write, fd, (uaddr)buf, (uaddr)count));
 }
 
 int close(int fd)
@@ -62,7 +55,7 @@ int close(int fd)
 
 off_t lseek(int fd, off_t off, int whence)
 {
-    return chk(sys3(NR_lseek, fd, (int)off, whence));
+    return chk(sys3(NR_lseek, fd, (uaddr)off, whence));
 }
 
 pid_t fork(void)
@@ -72,7 +65,7 @@ pid_t fork(void)
 
 int execve(const char *path, char *const argv[], char *const envp[])
 {
-    return chk(sys3(NR_exec, (int)path, (int)argv, (int)envp));
+    return chk(sys3(NR_exec, (uaddr)path, (uaddr)argv, (uaddr)envp));
 }
 
 void _exit(int status)
@@ -97,9 +90,42 @@ pid_t getppid(void)
     return chk(sys3(NR_getppid, 0, 0, 0));
 }
 
+uid_t getuid(void) { return chk(sys3(NR_getuid, 0, 0, 0)); }
+uid_t geteuid(void) { return chk(sys3(NR_geteuid, 0, 0, 0)); }
+gid_t getgid(void) { return chk(sys3(NR_getgid, 0, 0, 0)); }
+gid_t getegid(void) { return chk(sys3(NR_getegid, 0, 0, 0)); }
+int setuid(uid_t uid) { return chk(sys3(NR_setuid, uid, 0, 0)); }
+int setgid(gid_t gid) { return chk(sys3(NR_setgid, gid, 0, 0)); }
+int seteuid(uid_t uid) { return chk(sys3(NR_seteuid, uid, 0, 0)); }
+int setegid(gid_t gid) { return chk(sys3(NR_setegid, gid, 0, 0)); }
+int setresuid(uid_t uid, uid_t euid, uid_t suid)
+{
+    return chk(sys3(NR_setresuid, uid, euid, suid));
+}
+int setresgid(gid_t gid, gid_t egid, gid_t sgid)
+{
+    return chk(sys3(NR_setresgid, gid, egid, sgid));
+}
+int getgroups(int size, gid_t groups[])
+{
+    return chk(sys3(NR_getgroups, size, (uaddr)groups, 0));
+}
+int setgroups(int size, const gid_t groups[])
+{
+    return chk(sys3(NR_setgroups, size, (uaddr)groups, 0));
+}
+int chown(const char *path, uid_t uid, gid_t gid)
+{
+    return chk(sys3(NR_chown, (uaddr)path, uid, gid));
+}
+int fchown(int fd, uid_t uid, gid_t gid)
+{
+    return chk(sys3(NR_fchown, fd, uid, gid));
+}
+
 int pipe(int fds[2])
 {
-    return chk(sys3(NR_pipe, (int)fds, 0, 0));
+    return chk(sys3(NR_pipe, (uaddr)fds, 0, 0));
 }
 
 int dup(int fd)
@@ -119,12 +145,12 @@ int isatty(int fd)
 
 int chdir(const char *path)
 {
-    return chk(sys3(NR_chdir, (int)path, 0, 0));
+    return chk(sys3(NR_chdir, (uaddr)path, 0, 0));
 }
 
 char *getcwd(char *buf, size_t size)
 {
-    if (chk(sys3(NR_getcwd, (int)buf, (int)size, 0)) < 0) {
+    if (chk(sys3(NR_getcwd, (uaddr)buf, (uaddr)size, 0)) < 0) {
         return 0;
     }
     return buf;
@@ -132,62 +158,62 @@ char *getcwd(char *buf, size_t size)
 
 int unlink(const char *path)
 {
-    return chk(sys3(NR_unlink, (int)path, 0, 0));
+    return chk(sys3(NR_unlink, (uaddr)path, 0, 0));
 }
 
 int rmdir(const char *path)
 {
-    return chk(sys3(NR_rmdir, (int)path, 0, 0));
+    return chk(sys3(NR_rmdir, (uaddr)path, 0, 0));
 }
 
 int access(const char *path, int mode)
 {
-    return chk(sys3(NR_access, (int)path, mode, 0));
+    return chk(sys3(NR_access, (uaddr)path, mode, 0));
 }
 
 int truncate(const char *path, off_t length)
 {
-    return chk(sys3(NR_truncate, (int)path, (int)length, 0));
+    return chk(sys3(NR_truncate, (uaddr)path, (uaddr)length, 0));
 }
 
 int ftruncate(int fd, off_t length)
 {
-    return chk(sys3(NR_ftruncate, fd, (int)length, 0));
+    return chk(sys3(NR_ftruncate, fd, (uaddr)length, 0));
 }
 
 int stat(const char *path, struct stat *st)
 {
-    return chk(sys3(NR_stat, (int)path, (int)st, 0));
+    return chk(sys3(NR_stat, (uaddr)path, (uaddr)st, 0));
 }
 
 int fstat(int fd, struct stat *st)
 {
-    return chk(sys3(NR_fstat, fd, (int)st, 0));
+    return chk(sys3(NR_fstat, fd, (uaddr)st, 0));
 }
 
 int mkdir(const char *path, mode_t mode)
 {
-    return chk(sys3(NR_mkdir, (int)path, (int)mode, 0));
+    return chk(sys3(NR_mkdir, (uaddr)path, (uaddr)mode, 0));
 }
 
 int chmod(const char *path, mode_t mode)
 {
-    return chk(sys3(NR_chmod, (int)path, (int)mode, 0));
+    return chk(sys3(NR_chmod, (uaddr)path, (uaddr)mode, 0));
 }
 
 int fchmod(int fd, mode_t mode)
 {
-    return chk(sys3(NR_fchmod, fd, (int)mode, 0));
+    return chk(sys3(NR_fchmod, fd, (uaddr)mode, 0));
 }
 
 int rename(const char *oldp, const char *newp)
 {
-    return chk(sys3(NR_rename, (int)oldp, (int)newp, 0));
+    return chk(sys3(NR_rename, (uaddr)oldp, (uaddr)newp, 0));
 }
 
 int open(const char *path, int flags, ...)
 {
-    return chk(sys3(NR_open, (int)path, flags, 0));
+    return chk(sys3(NR_open, (uaddr)path, flags, 0));
 }
 
 int fcntl(int fd, int cmd, ...)
@@ -202,12 +228,12 @@ int fcntl(int fd, int cmd, ...)
 
 pid_t waitpid(pid_t pid, int *status, int options)
 {
-    return chk(sys3(NR_waitpid, pid, (int)status, options));
+    return chk(sys3(NR_waitpid, pid, (uaddr)status, options));
 }
 
 int getdents(int fd, char *buf, unsigned int max)
 {
-    return chk(sys3(NR_getdents, fd, (int)buf, (int)max));
+    return chk(sys3(NR_getdents, fd, (uaddr)buf, (uaddr)max));
 }
 
 int ioctl(int fd, unsigned long request, ...)
@@ -217,29 +243,29 @@ int ioctl(int fd, unsigned long request, ...)
     va_start(ap, request);
     arg = va_arg(ap, void *);
     va_end(ap);
-    return chk(sys3(NR_ioctl, fd, (int)request, (int)arg));
+    return chk(sys3(NR_ioctl, fd, (uaddr)request, (uaddr)arg));
 }
 
 int uname(struct utsname *u)
 {
-    return chk(sys3(NR_uname, (int)u, 0, 0));
+    return chk(sys3(NR_uname, (uaddr)u, 0, 0));
 }
 
 int clock_gettime(int clk, struct timespec *ts)
 {
-    return chk(sys3(NR_clock_gettime, clk, (int)ts, 0));
+    return chk(sys3(NR_clock_gettime, clk, (uaddr)ts, 0));
 }
 
 int gettimeofday(struct timeval *tv, void *tz)
 {
     (void)tz;
-    return chk(sys3(NR_gettimeofday, (int)tv, 0, 0));
+    return chk(sys3(NR_gettimeofday, (uaddr)tv, 0, 0));
 }
 
 int nanosleep(const struct timespec *req, struct timespec *rem)
 {
     (void)rem;
-    return chk(sys3(NR_nanosleep, (int)req, 0, 0));
+    return chk(sys3(NR_nanosleep, (uaddr)req, 0, 0));
 }
 
 unsigned int sleep(unsigned int seconds)
@@ -274,7 +300,7 @@ time_t time(time_t *t)
 
 long brk(void *addr)
 {
-    int r = sys3(NR_brk, (int)addr, 0, 0);
+    int r = sys3(NR_brk, (uaddr)addr, 0, 0);
     if (r < 0) {
         errno = -r;
         return -1;
@@ -309,7 +335,7 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
     ma.flags = (unsigned int)flags;
     ma.fd = fd;
     ma.offset = (unsigned int)off;
-    r = sys3(NR_mmap, (int)&ma, 0, 0);
+    r = sys3(NR_mmap, (uaddr)&ma, 0, 0);
     if (r < 0) {
         errno = -r;
         return MAP_FAILED;
@@ -319,22 +345,22 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
 
 int munmap(void *addr, size_t len)
 {
-    return chk(sys3(NR_munmap, (int)addr, (int)len, 0));
+    return chk(sys3(NR_munmap, (uaddr)addr, (uaddr)len, 0));
 }
 
 int mprotect(void *addr, size_t len, int prot)
 {
-    return chk(sys3(NR_mprotect, (int)addr, (int)len, prot));
+    return chk(sys3(NR_mprotect, (uaddr)addr, (uaddr)len, prot));
 }
 
 int msync(void *addr, size_t len, int flags)
 {
-    return chk(sys3(NR_msync, (int)addr, (int)len, flags));
+    return chk(sys3(NR_msync, (uaddr)addr, (uaddr)len, flags));
 }
 
 int madvise(void *addr, size_t len, int advice)
 {
-    return chk(sys3(NR_madvise, (int)addr, (int)len, advice));
+    return chk(sys3(NR_madvise, (uaddr)addr, (uaddr)len, advice));
 }
 
 int kill(int pid, int sig)
@@ -349,17 +375,17 @@ int raise(int sig)
 
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old)
 {
-    return chk(sys3(NR_sigaction, sig, (int)act, (int)old));
+    return chk(sys3(NR_sigaction, sig, (uaddr)act, (uaddr)old));
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *old)
 {
-    return chk(sys3(NR_sigprocmask, how, (int)set, (int)old));
+    return chk(sys3(NR_sigprocmask, how, (uaddr)set, (uaddr)old));
 }
 
 int sigpending(sigset_t *set)
 {
-    return chk(sys3(NR_sigpending, (int)set, 0, 0));
+    return chk(sys3(NR_sigpending, (uaddr)set, 0, 0));
 }
 
 extern void __libc_sigrestorer(void);
@@ -380,7 +406,7 @@ sighandler_t signal(int sig, sighandler_t handler)
 
 unsigned int alarm(unsigned int seconds)
 {
-    int r = sys3(NR_alarm, (int)seconds, 0, 0);
+    int r = sys3(NR_alarm, (uaddr)seconds, 0, 0);
     if (r < 0) {
         errno = -r;
         return 0;
@@ -430,7 +456,7 @@ int socket(int domain, int type, int protocol)
 
 int bind(int fd, const struct sockaddr *addr, socklen_t len)
 {
-    return chk(sys3(NR_bind, fd, (int)addr, (int)len));
+    return chk(sys3(NR_bind, fd, (uaddr)addr, (uaddr)len));
 }
 
 int listen(int fd, int backlog)
@@ -440,17 +466,17 @@ int listen(int fd, int backlog)
 
 int accept(int fd, struct sockaddr *addr, socklen_t *len)
 {
-    return chk(sys3(NR_accept, fd, (int)addr, (int)len));
+    return chk(sys3(NR_accept, fd, (uaddr)addr, (uaddr)len));
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len)
 {
-    return chk(sys3(NR_connect, fd, (int)addr, (int)len));
+    return chk(sys3(NR_connect, fd, (uaddr)addr, (uaddr)len));
 }
 
 int socketpair(int domain, int type, int protocol, int sv[2])
 {
-    return chk(sys4(NR_socketpair, domain, type, protocol, (int)sv));
+    return chk(sys4(NR_socketpair, domain, type, protocol, (uaddr)sv));
 }
 
 int shutdown(int fd, int how)
@@ -460,12 +486,12 @@ int shutdown(int fd, int how)
 
 int getsockname(int fd, struct sockaddr *addr, socklen_t *len)
 {
-    return chk(sys3(NR_getsockname, fd, (int)addr, (int)len));
+    return chk(sys3(NR_getsockname, fd, (uaddr)addr, (uaddr)len));
 }
 
 int getpeername(int fd, struct sockaddr *addr, socklen_t *len)
 {
-    return chk(sys3(NR_getpeername, fd, (int)addr, (int)len));
+    return chk(sys3(NR_getpeername, fd, (uaddr)addr, (uaddr)len));
 }
 
 long send(int fd, const void *buf, size_t len, int flags)
@@ -490,7 +516,7 @@ long sendto(int fd, const void *buf, size_t len, int flags,
     a.flags = flags;
     a.addr = addr;
     a.alen = alen;
-    return chk(sys3(NR_sendto, (int)&a, 0, 0));
+    return chk(sys3(NR_sendto, (uaddr)&a, 0, 0));
 }
 
 long recvfrom(int fd, void *buf, size_t len, int flags,
@@ -503,7 +529,7 @@ long recvfrom(int fd, void *buf, size_t len, int flags,
     a.flags = flags;
     a.addr = addr;
     a.alen = (unsigned int *)alen;
-    return chk(sys3(NR_recvfrom, (int)&a, 0, 0));
+    return chk(sys3(NR_recvfrom, (uaddr)&a, 0, 0));
 }
 
 int setsockopt(int fd, int level, int name, const void *val, socklen_t len)
@@ -522,7 +548,7 @@ int getsockopt(int fd, int level, int name, void *val, socklen_t *len)
 
 int poll(struct pollfd *fds, unsigned int nfds, int timeout)
 {
-    return chk(sys3(NR_poll, (int)fds, (int)nfds, timeout));
+    return chk(sys3(NR_poll, (uaddr)fds, (uaddr)nfds, timeout));
 }
 
 int select(int nfds, fd_set *readfds, fd_set *writefds,
@@ -559,7 +585,7 @@ int select(int nfds, fd_set *readfds, fd_set *writefds,
         if (timeout->tv_sec > 0x7FFFFF) {
             tmo = 0x7FFFFFFF;
         } else {
-            tmo = (int)(timeout->tv_sec * 1000u + timeout->tv_usec / 1000u);
+            tmo = (uaddr)(timeout->tv_sec * 1000u + timeout->tv_usec / 1000u);
         }
     }
     r = poll(pfds, (unsigned int)n, tmo);

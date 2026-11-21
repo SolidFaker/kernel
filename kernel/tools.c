@@ -19,7 +19,7 @@ void printk(const char *format, ...)
 
     buff[i] = '\0';
 
-#ifdef DEBUG_E9
+#if defined(DEBUG_E9) && (defined(__i386__) || defined(__x86_64__))
     {   /* mirror output to the E9 debug port (QEMU isa-debugcon) */
         const char *c;
         for (c = buff; *c; c++) {
@@ -63,7 +63,7 @@ static int skip_atoi(const char **s)
     return i;
 }
 
-static char *number(char *str, int num, int base, int size, int precision, int type)
+static char *number(char *str, uaddr num, int base, int size, int precision, int type)
 {
     char c, sign, tmp[36];
     const char *digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -81,9 +81,9 @@ static char *number(char *str, int num, int base, int size, int precision, int t
 
     c = (type & ZEROPAD) ? '0' : ' ' ;
 
-    if (type & SIGN && num < 0) {
+    if (type & SIGN && (int)num < 0) {
         sign = '-';
-        num = -num;
+        num = (u32)(-(int)num);
     } else {
         sign = (type&PLUS) ? '+' : ((type&SPACE) ? ' ' : 0);
     }
@@ -258,7 +258,7 @@ repeat:
 
             case 'p':
                 if (field_width == -1) {
-                    field_width = 8;
+                    field_width = 2 * (int)sizeof(void *);
                     flags |= ZEROPAD;
                 }
                 str = number(str, (unsigned long) va_arg(args, void *), 16,

@@ -62,6 +62,19 @@ as fallbacks when their binaries are present. Coreutils uses one static binary p
 small shebang entry points, so the image does not contain a separate libc copy for
 every utility.
 
+## Other architectures
+
+Use `bash build-arch.sh aarch64|x86_64` for the non-legacy images. Their
+products are separated into `build/<arch>/`, so they do not overwrite the x86
+`build/80m.img`. The script uses Zig for AArch64 and the x86_64 kernel, plus
+i686-elf binutils/GCC for the x86_64 BIOS loader.
+
+For a non-interactive regression, set `EXTRA_CFLAGS=-DAUTO_DEMO` (full POSIX
+script), `-DAUTO_NATIVE` (postest and libctest through Bash),
+`-DAUTO_SMOKE` (short Bash/Coreutils test) or `-DAUTO_MULTI` (multi-user test).
+See `docs/architecture.md` for QEMU
+loader arguments and the current validation status.
+
 ## Headless debug
 
 Build with `-DDEBUG_E9` in the kernel CFLAGS and mirror printk output to QEMU's E9 port:

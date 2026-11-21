@@ -119,5 +119,6 @@ void open_fs(struct fs_node *node, u8 read, u8 write);
 void close_fs(struct fs_node *node);
 struct dirent *readdir_fs(struct fs_node *node, u32 index);
 struct fs_node *finddir_fs(struct fs_node *node, char *name);
+int fs_permission(struct fs_node *node, u32 mode);
 
 #endif

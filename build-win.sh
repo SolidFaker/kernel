@@ -14,10 +14,12 @@ CC="${CROSS}gcc"
 AS="${CROSS}as"
 LD="${CROSS}ld"
 AR="${CROSS}ar"
+ARCH="${ARCH:-x86}"
+ARCH_DIR="arch/$ARCH"
 BUILD=build
 OUT="$BUILD/bin"
 OBJ="$BUILD/obj"
-CFLAGS="-c -g -Os -ffreestanding -Wall -Werror -fno-stack-protector -I./include ${EXTRA_CFLAGS:-} ${AUTO_DEMO:+-DAUTO_DEMO}"
+CFLAGS="-c -g -Os -ffreestanding -Wall -Werror -fno-stack-protector -I./include -I./$ARCH_DIR/include ${EXTRA_CFLAGS:-} ${AUTO_DEMO:+-DAUTO_DEMO}"
 
 "$CC" --version >/dev/null 2>&1 || { echo "cross gcc not found: $CC"; exit 1; }
 "$HOSTCC" --version >/dev/null 2>&1 || { echo "host gcc not found: $HOSTCC"; exit 1; }
@@ -27,43 +29,44 @@ mkdir -p "$OUT" "$OBJ/boot" "$OBJ/user" "$OBJ/user/libc"
 
 # ---- kernel ----
 OBJS=""
-for f in $(find kernel mm fs drivers init -name '*.c' | sort); do
+for f in $(find kernel mm fs drivers init "$ARCH_DIR/kernel" "$ARCH_DIR/mm" "$ARCH_DIR/drivers" -name '*.c' | sort); do
+    if [ "$f" = kernel/arch_entry.c ]; then continue; fi
     o="$OBJ/${f%.c}.o"
     mkdir -p "$(dirname "$o")"
     "$CC" $CFLAGS "$f" -o "$o"
     OBJS="$OBJS $o"
 done
-for f in $(find kernel -name '*.s' | sort); do
+for f in $(find kernel "$ARCH_DIR/kernel" -name '*.s' | sort); do
     o="$OBJ/${f%.s}.o"
     mkdir -p "$(dirname "$o")"
     "$AS" --32 "$f" -o "$o"
     OBJS="$OBJS $o"
 done
-"$LD" -Ttools/kernel_link.ld -static -nostdlib --nmagic -melf_i386 $OBJS \
+"$LD" -T"$ARCH_DIR/kernel_link.ld" -static -nostdlib --nmagic -melf_i386 $OBJS \
     -o "$OUT/kernel.elf" -Map "$BUILD/kernel.map"
 
 # ---- boot sector + loader (hd.o/string.o/elf.o are shared with the kernel) ----
-"$AS" --32 boot/boot.s -o "$OBJ/boot/boot.o"
+"$AS" --32 "$ARCH_DIR/boot/boot.s" -o "$OBJ/boot/boot.o"
 "$LD" -Ttext 0x7c00 --oformat=binary "$OBJ/boot/boot.o" -o "$OUT/boot.bin"
 
-"$AS" --32 boot/loaderasm.s -o "$OBJ/boot/loaderasm.o"
-"$CC" $CFLAGS boot/loadermain.c -o "$OBJ/boot/loadermain.o"
-"$LD" -Ttools/loader_link.ld -static -nostdlib --nmagic --oformat=binary -melf_i386 \
-    "$OBJ/boot/loaderasm.o" "$OBJ/boot/loadermain.o" "$OBJ/drivers/hd.o" \
+"$AS" --32 "$ARCH_DIR/boot/loaderasm.s" -o "$OBJ/boot/loaderasm.o"
+"$CC" $CFLAGS "$ARCH_DIR/boot/loadermain.c" -o "$OBJ/boot/loadermain.o"
+"$LD" -T"$ARCH_DIR/loader_link.ld" -static -nostdlib --nmagic --oformat=binary -melf_i386 \
+    "$OBJ/boot/loaderasm.o" "$OBJ/boot/loadermain.o" "$OBJ/$ARCH_DIR/drivers/hd.o" \
     "$OBJ/kernel/string.o" "$OBJ/kernel/elf.o" -o "$OUT/loader.bin"
 
 # ---- user programs ----
-UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall -I./include"
+UFLAGS="-c -Os -ffreestanding -fno-pie -fno-stack-protector -fno-builtin -Wall -I./include -I./$ARCH_DIR/include"
 "$CC" $UFLAGS user/hello.c -o "$OBJ/user/hello.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic "$OBJ/user/hello.o" -o "$OUT/hello.elf"
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic "$OBJ/user/hello.o" -o "$OUT/hello.elf"
 "$CC" $UFLAGS ${AUTO_DEMO:+-DAUTO_DEMO} user/shell.c -o "$OBJ/user/shell.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic "$OBJ/user/shell.o" -o "$OUT/shell.elf"
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic "$OBJ/user/shell.o" -o "$OUT/shell.elf"
 "$CC" $UFLAGS user/gfx.c -o "$OBJ/user/gfx.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic "$OBJ/user/gfx.o" -o "$OUT/gfx.elf"
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic "$OBJ/user/gfx.o" -o "$OUT/gfx.elf"
 "$CC" $UFLAGS user/postest.c -o "$OBJ/user/postest.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic "$OBJ/user/postest.o" -o "$OUT/postest.elf"
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic "$OBJ/user/postest.o" -o "$OUT/postest.elf"
 "$CC" $UFLAGS user/toyrun.c -o "$OBJ/user/toyrun.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic "$OBJ/user/toyrun.o" -o "$OUT/toyrun.elf"
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic "$OBJ/user/toyrun.o" -o "$OUT/toyrun.elf"
 
 # ---- libc + standard C demos ----
 for f in user/libc/*.c; do
@@ -73,11 +76,14 @@ for f in user/libc/*.c; do
 done
 "$AR" rcs "$BUILD/libc.a" "$OBJ"/user/libc/*.o
 "$CC" -Iuser/libc/include $UFLAGS user/libctest.c -o "$OBJ/user/libctest.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic \
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic \
     "$OBJ/user/libc/crt0.o" "$OBJ/user/libctest.o" "$BUILD/libc.a" -o "$OUT/libctest.elf"
 "$CC" -Iuser/libc/include $UFLAGS user/nettest.c -o "$OBJ/user/nettest.o"
-"$LD" -Ttools/user_link.ld -static -nostdlib --nmagic \
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic \
     "$OBJ/user/libc/crt0.o" "$OBJ/user/nettest.o" "$BUILD/libc.a" -o "$OUT/nettest.elf"
+"$CC" -Iuser/libc/include $UFLAGS user/userctl.c -o "$OBJ/user/userctl.o"
+"$LD" -T"$ARCH_DIR/user_link.ld" -static -nostdlib --nmagic \
+    "$OBJ/user/libc/crt0.o" "$OBJ/user/userctl.o" "$BUILD/libc.a" -o "$OUT/userctl.elf"
 
 # ---- musl Bash + single-binary Coreutils ----
 BASH_BIN="${BASH_BIN:-I:/tools/posix/build/bash/bash}"
@@ -92,15 +98,16 @@ for f in "$OUT/bash.elf" "$OUT/coreutils.elf"; do
 done
 
 # ---- host tool: filesystem image ----
-"$HOSTCC" -Os -I./include tools/mkfs.c -o "$BUILD/mkfs_kernel.exe"
+"$HOSTCC" -Os -I./include -I./$ARCH_DIR/include tools/mkfs.c -o "$BUILD/mkfs_kernel.exe"
 mkfs_args=(
     "$OUT/loader.bin" loader.bin "$OUT/kernel.elf" kernel.elf
     "$OUT/hello.elf" hello.elf "$OUT/shell.elf" shell.elf
     "$OUT/gfx.elf" gfx.elf "$OUT/postest.elf" postest.elf
     "$OUT/libctest.elf" libctest.elf "$OUT/nettest.elf" nettest.elf
+    "$OUT/userctl.elf" userctl.elf
     "$OUT/toyrun.elf" toyrun.elf "$OUT/bash.elf" bash.elf
     "$OUT/coreutils.elf" coreutils.elf ./README.md README
-    ./user/posix-test.sh posix-test.sh
+    ./user/posix-test.sh posix-test.sh ./user/users-test.sh users-test.sh
 )
 mkdir -p "$BUILD/posix-bin"
 for name in $(awk -F'"' '/^SINGLE_BINARY_PROGRAM/ {print $2}' "$COREUTILS_BUILD/src/coreutils.h"); do

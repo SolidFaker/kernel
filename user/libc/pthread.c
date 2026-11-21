@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <arch/user.h>
 
 #define THREAD_STACK (64 * 1024)
 #define MAX_THREADS 32
@@ -22,23 +23,19 @@ struct thread_slot {
 
 static struct thread_slot slots[MAX_THREADS];
 
-static int thr_sys3(int nr, int a, int b, int c)
+static reg_t thr_sys3(reg_t nr, reg_t a, reg_t b, reg_t c)
 {
-    int r;
-    __asm__ volatile("int $0x80" : "=a" (r)
-                     : "0" (nr), "b" (a), "c" (b), "d" (c)
-                     : "memory");
-    return r;
+    return arch_syscall3(nr, a, b, c);
 }
 
 static int futex_wait(volatile int *addr, int val)
 {
-    return thr_sys3(NR_futex, 0, (int)addr, val);
+    return thr_sys3(NR_futex, 0, (uaddr)addr, val);
 }
 
 static int futex_wake(volatile int *addr, int count)
 {
-    return thr_sys3(NR_futex, 1, (int)addr, count);
+    return thr_sys3(NR_futex, 1, (uaddr)addr, count);
 }
 
 static void thread_entry(struct thread_arg *ta)
@@ -79,8 +76,8 @@ int pthread_create(pthread_t *tid, const pthread_attr_t *attr,
     ta->fn = start;
     ta->arg = arg;
 
-    id = thr_sys3(NR_thread_create, (int)thread_entry, (int)ta,
-                  (int)stack + THREAD_STACK);
+    id = thr_sys3(NR_thread_create, (uaddr)thread_entry, (uaddr)ta,
+                  (uaddr)stack + THREAD_STACK);
     if (id < 0) {
         errno = -id;
         free(ta);
@@ -105,7 +102,7 @@ int pthread_create(pthread_t *tid, const pthread_attr_t *attr,
 int pthread_join(pthread_t tid, void **retval)
 {
     int st = 0;
-    int r = thr_sys3(NR_thread_wait, (int)tid, (int)&st, 0);
+    int r = thr_sys3(NR_thread_wait, (uaddr)tid, (uaddr)&st, 0);
     int i;
 
     if (r < 0) {
@@ -133,7 +130,7 @@ int pthread_detach(pthread_t tid)
 
 void pthread_exit(void *retval)
 {
-    thr_sys3(NR_thread_exit, (int)retval, 0, 0);
+    thr_sys3(NR_thread_exit, (uaddr)retval, 0, 0);
     for (;;) {
     }
 }
@@ -191,7 +188,7 @@ int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m)
 {
     unsigned int seq = c->seq;
     pthread_mutex_unlock(m);
-    futex_wait((volatile int *)&c->seq, (int)seq);
+    futex_wait((volatile int *)&c->seq, (uaddr)seq);
     pthread_mutex_lock(m);
     return 0;
 }

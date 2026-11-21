@@ -21,8 +21,8 @@ typedef __builtin_va_list va_list;
 #define SMALL	  	64  	// use 'abcdef' instead of 'ABCDEF'
 
 #define do_div(n,base) ({ \
-        int __res; \
-        __asm__("divl %4":"=a" (n),"=d" (__res):"0" (n),"1" (0),"r" (base)); \
+        int __res = (n) % (base); \
+        n = (n) / (base); \
         __res; })
 
 

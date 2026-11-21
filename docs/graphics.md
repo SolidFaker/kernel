@@ -7,7 +7,7 @@ The 16-bit loader sets VBE mode `1280x1024x32` with a linear framebuffer and wri
 
 - physical framebuffer address, width, height, pitch and bpp
 - kernel maps it at virtual `0xD0000000`
-- `drivers/fbcon.c` owns rendering
+- `arch/x86/drivers/fbcon.c` owns rendering
 
 ## Graphical terminal
 
@@ -20,7 +20,7 @@ The 16-bit loader sets VBE mode `1280x1024x32` with a linear framebuffer and wri
 - text output still goes through `NR_write`; user programs do not need to know about
   the framebuffer
 
-`drivers/display.c` keeps the tty cell grid in RAM and calls `fbcon` for rendering.
+`arch/x86/drivers/display.c` keeps the tty cell grid in RAM and calls `fbcon` for rendering.
 `drivers/tty.c` handles tty selection and cursor restoration.
 
 ## Scroll performance
@@ -35,7 +35,7 @@ The 16-bit loader sets VBE mode `1280x1024x32` with a linear framebuffer and wri
 
 ## `gfx` demo
 
-`drivers/graphic.c` provides a logical 320x200x256 canvas:
+`arch/x86/drivers/graphic.c` provides a logical 320x200x256 canvas:
 
 - pixels, lines, rectangles, circles, 8x8 text
 - 3-3-2 color packing via `GFX_RGB()`

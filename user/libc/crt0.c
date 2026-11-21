@@ -1,6 +1,7 @@
-// C runtime entry: the kernel enters here with [esp] = argc, followed by
-// argv[] and a NULL envp[]. Call main() and then exit().
+#include "unistd.h"
+#include "arch/user.h"
 
+#if defined(__i386__)
 __asm__(
 ".text\n"
 ".globl _start\n"
@@ -18,12 +19,12 @@ __asm__(
 "  call exit\n"
 "  hlt\n"
 );
+#endif
 
 char **environ = 0;
 
-__asm__(
-".globl __libc_sigrestorer\n"
-"__libc_sigrestorer:\n"
-"  movl $51, %eax\n"
-"  int $0x80\n"
-);
+__attribute__((noreturn)) void __libc_sigrestorer(void)
+{
+    arch_syscall0(NR_sigreturn);
+    for (;;) { }
+}

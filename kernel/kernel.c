@@ -16,7 +16,7 @@
 #include "drivers/keyboard.h"
 #include "drivers/tty.h"
 
-static inline void init_stack();
+extern void arch_init_stack(void);
 static void print_info();
 
 void kernel_start(void)
@@ -24,7 +24,7 @@ void kernel_start(void)
     // kernel state initialising
     // no print function here
     init_desc();
-    init_stack();
+    arch_init_stack();
 
     // print function initialized
     init_tty();
@@ -80,21 +80,6 @@ void kernel_start(void)
     }
 
     hlt();
-}
-
-static inline void init_stack()
-{
-    // use new stack space; one asm block so the input setup cannot be
-    // interleaved with the stack switch
-    asm volatile (
-        "movw $0x10, %%ax\n\t"
-        "movw %%ax, %%ss\n\t"
-        "movl %0, %%ebp\n\t"
-        "movl %1, %%esp\n\t"
-        :
-        : "r" ((u32)kernel_stack),
-          "r" ((u32)kernel_stack + sizeof(kernel_stack))
-        : "eax", "memory");
 }
 
 static void print_info()

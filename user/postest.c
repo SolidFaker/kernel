@@ -4,41 +4,36 @@
 
 #include "unistd.h"
 #include "posix_abi.h"
+#include "arch/user.h"
 
-__asm__(
-".globl sig_restorer\n"
-"sig_restorer:\n"
-"  movl $51, %eax\n"      /* NR_sigreturn */
-"  int $0x80\n"
-);
-extern void sig_restorer(void);
+__attribute__((noreturn)) void sig_restorer(void)
+{
+    arch_syscall0(NR_sigreturn);
+    for (;;) { }
+}
 
 static volatile int got_sig;
 
 static int fails;
 
-static int sys_call(int nr, int a, int b, int c)
+static saddr sys_call(reg_t nr, reg_t a, reg_t b, reg_t c)
 {
-    int r;
-    __asm__ volatile("int $0x80" : "=a" (r)
-                     : "0" (nr), "b" (a), "c" (b), "d" (c)
-                     : "memory");
-    return r;
+    return (saddr)arch_syscall3(nr, a, b, c);
 }
 
 static int write(int fd, const void *buf, unsigned int len)
 {
-    return sys_call(NR_write, fd, (int)buf, (int)len);
+    return sys_call(NR_write, fd, (uaddr)buf, (uaddr)len);
 }
 
 static int read(int fd, void *buf, unsigned int len)
 {
-    return sys_call(NR_read, fd, (int)buf, (int)len);
+    return sys_call(NR_read, fd, (uaddr)buf, (uaddr)len);
 }
 
 static int open(const char *path, int flags)
 {
-    return sys_call(NR_open, (int)path, flags, 0);
+    return sys_call(NR_open, (uaddr)path, flags, 0);
 }
 
 static int close(int fd)
@@ -53,7 +48,7 @@ static int lseek(int fd, int off, int whence)
 
 static int pipe(int *fds)
 {
-    return sys_call(NR_pipe, (int)fds, 0, 0);
+    return sys_call(NR_pipe, (uaddr)fds, 0, 0);
 }
 
 static int dup(int fd)
@@ -73,60 +68,60 @@ static int fork(void)
 
 static int waitpid(int pid, int *st, int options)
 {
-    return sys_call(NR_waitpid, pid, (int)st, options);
+    return sys_call(NR_waitpid, pid, (uaddr)st, options);
 }
 
 static int unlink(const char *path)
 {
-    return sys_call(NR_unlink, (int)path, 0, 0);
+    return sys_call(NR_unlink, (uaddr)path, 0, 0);
 }
 
 static int mkdir(const char *path, int mode)
 {
-    return sys_call(NR_mkdir, (int)path, mode, 0);
+    return sys_call(NR_mkdir, (uaddr)path, mode, 0);
 }
 
 static int rmdir(const char *path)
 {
-    return sys_call(NR_rmdir, (int)path, 0, 0);
+    return sys_call(NR_rmdir, (uaddr)path, 0, 0);
 }
 
 static int rename(const char *oldp, const char *newp)
 {
-    return sys_call(NR_rename, (int)oldp, (int)newp, 0);
+    return sys_call(NR_rename, (uaddr)oldp, (uaddr)newp, 0);
 }
 
 static int ftruncate(int fd, unsigned int len)
 {
-    return sys_call(NR_ftruncate, fd, (int)len, 0);
+    return sys_call(NR_ftruncate, fd, (uaddr)len, 0);
 }
 
 static void *mmap(void *addr, unsigned int len, int prot, int flags,
                   int fd, unsigned int off)
 {
     struct mmap_args ma;
-    ma.addr = (unsigned int)addr;
+    ma.addr = (uaddr)addr;
     ma.len = len;
     ma.prot = (unsigned int)prot;
     ma.flags = (unsigned int)flags;
     ma.fd = fd;
     ma.offset = off;
-    return (void *)sys_call(NR_mmap, (int)&ma, 0, 0);
+    return (void *)sys_call(NR_mmap, (uaddr)&ma, 0, 0);
 }
 
 static int munmap(void *addr, unsigned int len)
 {
-    return sys_call(NR_munmap, (int)addr, (int)len, 0);
+    return sys_call(NR_munmap, (uaddr)addr, (uaddr)len, 0);
 }
 
 static int mprotect(void *addr, unsigned int len, int prot)
 {
-    return sys_call(NR_mprotect, (int)addr, (int)len, prot);
+    return sys_call(NR_mprotect, (uaddr)addr, (uaddr)len, prot);
 }
 
 static int ioctl(int fd, unsigned int req, void *arg)
 {
-    return sys_call(NR_ioctl, fd, (int)req, (int)arg);
+    return sys_call(NR_ioctl, fd, (uaddr)req, (uaddr)arg);
 }
 
 static void exit(int st)
@@ -174,28 +169,28 @@ static void pass(const char *name, int ok)
 static void getcwd_test(void)
 {
     char buf[128];
-    int r = sys_call(NR_getcwd, (int)buf, sizeof(buf), 0);
+    int r = sys_call(NR_getcwd, (uaddr)buf, sizeof(buf), 0);
     pass("getcwd root", r == 0 && buf[0] == '/');
 
-    r = sys_call(NR_chdir, (int)"/dev", 0, 0);
-    sys_call(NR_getcwd, (int)buf, sizeof(buf), 0);
+    r = sys_call(NR_chdir, (uaddr)"/dev", 0, 0);
+    sys_call(NR_getcwd, (uaddr)buf, sizeof(buf), 0);
     pass("chdir /dev", r == 0 && seq(buf, "/dev"));
 
-    sys_call(NR_chdir, (int)"/", 0, 0);
-    sys_call(NR_getcwd, (int)buf, sizeof(buf), 0);
+    sys_call(NR_chdir, (uaddr)"/", 0, 0);
+    sys_call(NR_getcwd, (uaddr)buf, sizeof(buf), 0);
     pass("chdir /", seq(buf, "/"));
 }
 
 static void stat_test(void)
 {
     struct stat st;
-    int r = sys_call(NR_stat, (int)"/system/share/doc/README", (int)&st, 0);
+    int r = sys_call(NR_stat, (uaddr)"/system/share/doc/README", (uaddr)&st, 0);
     pass("stat README", r == 0 && S_ISREG(st.st_mode) && st.st_size > 0);
 
-    pass("access R_OK", sys_call(NR_access, (int)"/system/share/doc/README", R_OK, 0) == 0);
-    pass("access W_OK", sys_call(NR_access, (int)"/system/share/doc/README", W_OK, 0) == 0);
+    pass("access R_OK", sys_call(NR_access, (uaddr)"/system/share/doc/README", R_OK, 0) == 0);
+    pass("access W_OK", sys_call(NR_access, (uaddr)"/system/share/doc/README", W_OK, 0) == 0);
     pass("access ENOENT",
-         sys_call(NR_access, (int)"no-such-file", F_OK, 0) < 0);
+         sys_call(NR_access, (uaddr)"no-such-file", F_OK, 0) < 0);
 }
 
 static void misc_test(void)
@@ -204,13 +199,13 @@ static void misc_test(void)
     struct timespec ts;
     struct timeval tv;
 
-    pass("uname", sys_call(NR_uname, (int)&u, 0, 0) == 0 &&
+    pass("uname", sys_call(NR_uname, (uaddr)&u, 0, 0) == 0 &&
          seq(u.sysname, "a-mini-kernel"));
 
     pass("clock_gettime", sys_call(NR_clock_gettime, CLOCK_MONOTONIC,
-         (int)&ts, 0) == 0 && ts.tv_nsec < 1000000000u);
+         (uaddr)&ts, 0) == 0 && ts.tv_nsec < 1000000000u);
 
-    pass("gettimeofday", sys_call(NR_gettimeofday, (int)&tv, 0, 0) == 0 &&
+    pass("gettimeofday", sys_call(NR_gettimeofday, (uaddr)&tv, 0, 0) == 0 &&
          tv.tv_usec < 1000000u);
 
     pass("getppid", sys_call(NR_getppid, 0, 0, 0) > 0);
@@ -276,22 +271,22 @@ static int raise(int sig)
 
 static int sigaction(int sig, struct sigaction *act, struct sigaction *old)
 {
-    return sys_call(NR_sigaction, sig, (int)act, (int)old);
+    return sys_call(NR_sigaction, sig, (uaddr)act, (uaddr)old);
 }
 
 static int sigprocmask(int how, sigset_t *set, sigset_t *old)
 {
-    return sys_call(NR_sigprocmask, how, (int)set, (int)old);
+    return sys_call(NR_sigprocmask, how, (uaddr)set, (uaddr)old);
 }
 
 static int sigpending(sigset_t *set)
 {
-    return sys_call(NR_sigpending, (int)set, 0, 0);
+    return sys_call(NR_sigpending, (uaddr)set, 0, 0);
 }
 
 static int alarm(unsigned int sec)
 {
-    return sys_call(NR_alarm, (int)sec, 0, 0);
+    return sys_call(NR_alarm, (uaddr)sec, 0, 0);
 }
 
 static int setpgid(int pid, int pgid)
@@ -339,15 +334,15 @@ static void writable_test(void)
     n = read(fd, buf, sizeof(buf));
     pass("read back", n == 5 && seq(buf, "hello"));
     ftruncate(fd, 2);
-    sys_call(NR_stat, (int)"/p2file", (int)&st, 0);
+    sys_call(NR_stat, (uaddr)"/p2file", (uaddr)&st, 0);
     pass("ftruncate", st.st_size == 2);
     close(fd);
 
     pass("rename", rename("/p2file", "/p2renamed") == 0);
     pass("rename old gone",
-         sys_call(NR_stat, (int)"/p2file", (int)&st, 0) < 0);
+         sys_call(NR_stat, (uaddr)"/p2file", (uaddr)&st, 0) < 0);
     pass("rename new exists",
-         sys_call(NR_stat, (int)"/p2renamed", (int)&st, 0) == 0 &&
+         sys_call(NR_stat, (uaddr)"/p2renamed", (uaddr)&st, 0) == 0 &&
          st.st_size == 2);
     pass("unlink", unlink("/p2renamed") == 0);
 
@@ -385,16 +380,16 @@ static void mmap_test(void)
 
     p = (unsigned char *)mmap(0, 8192, PROT_READ | PROT_WRITE,
                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    pass("mmap anon", (int)p > 0);
+    pass("mmap anon", (uaddr)p > 0);
     p[0] = 0x5a;
     p[8191] = 0xa5;
     pass("mmap read/write", p[0] == 0x5a && p[8191] == 0xa5);
     pass("mprotect", mprotect(p, 8192, PROT_READ) == 0);
-    pass("msync", sys_call(NR_msync, (int)p, 8192, 0) == 0);
+    pass("msync", sys_call(NR_msync, (uaddr)p, 8192, 0) == 0);
 
     fd = open("/system/share/doc/README", O_RDONLY);
     m = mmap(0, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
-    pass("mmap file", (int)m > 0 && ((char *)m)[0] == '#' &&
+    pass("mmap file", (uaddr)m > 0 && ((char *)m)[0] == '#' &&
          ((char *)m)[1] == ' ');
     munmap(m, 4096);
     close(fd);
@@ -472,7 +467,7 @@ static void signal_test(void)
     }
     ts.tv_sec = 0;
     ts.tv_nsec = 100000000;
-    sys_call(NR_nanosleep, (int)&ts, 0, 0);
+    sys_call(NR_nanosleep, (uaddr)&ts, 0, 0);
     kill(pid, SIGTERM);
     waitpid(pid, &st, 0);
     pass("kill default action", st == 128 + SIGTERM);

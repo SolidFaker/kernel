@@ -11,15 +11,11 @@
 #include "page.h"
 #include "task.h"
 #include "drivers/timer.h"
+#include "arch/user.h"
 #include "string.h"
+#include "tools.h"
 
 #define SIG_BIT(s) (1u << (s))
-
-struct sig_context {
-    u32 edi, esi, ebp, ebx, edx, ecx, eax;
-    u32 eip, cs, eflags, useresp, ss;
-    u32 signum, old_mask;
-};
 
 static int default_ignored(int sig)
 {
@@ -50,9 +46,10 @@ void signal_init_task(struct task_struct *t)
 
     t->pending_sig = 0;
     t->blocked_sig = 0;
+    t->sig_frame = 0;
     t->alarm_tick = 0;
     for (i = 0; i < NSIG; i++) {
-        t->sig_handler[i] = (u32)SIG_DFL;
+        t->sig_handler[i] = (uaddr)SIG_DFL;
         t->sig_mask[i] = 0;
         t->sig_restorer[i] = 0;
     }
@@ -65,6 +62,7 @@ void signal_fork(struct task_struct *parent, struct task_struct *child)
     u32 i;
 
     child->pending_sig = 0;
+    child->sig_frame = 0;
     child->blocked_sig = parent->blocked_sig;
     child->alarm_tick = 0;
     for (i = 0; i < NSIG; i++) {
@@ -79,10 +77,11 @@ void signal_fork(struct task_struct *parent, struct task_struct *child)
 void signal_exec(struct task_struct *t)
 {
     u32 i;
+    t->sig_frame = 0;
 
     for (i = 0; i < NSIG; i++) {
-        if (t->sig_handler[i] != (u32)SIG_IGN) {
-            t->sig_handler[i] = (u32)SIG_DFL;
+        if (t->sig_handler[i] != (uaddr)SIG_IGN) {
+            t->sig_handler[i] = (uaddr)SIG_DFL;
             t->sig_mask[i] = 0;
             t->sig_restorer[i] = 0;
         }
@@ -134,7 +133,7 @@ int signal_kill(int pid, int sig)
         return -EINVAL;
     }
     if (pid > 0) {
-        struct task_struct *t = signal_find_task((u32)pid);
+        struct task_struct *t = signal_find_task((uaddr)pid);
         if (!t) {
             return -ESRCH;
         }
@@ -150,7 +149,7 @@ int signal_kill(int pid, int sig)
     node = running_task_head;
     do {
         struct task_struct *t = node->task;
-        u32 group = pid == 0 ? current->pgid : (u32)(-pid);
+        u32 group = pid == 0 ? current->pgid : (uaddr)(-pid);
         if (t->pgid == group) {
             found = 1;
             if (sig != 0) {
@@ -172,7 +171,7 @@ int signal_alarm(int seconds)
         old = (current->alarm_tick - now + TIMER_HZ - 1) / TIMER_HZ;
     }
     current->alarm_tick = seconds > 0 ?
-        now + (u32)seconds * TIMER_HZ : 0;
+        now + (uaddr)seconds * TIMER_HZ : 0;
     return (int)old;
 }
 
@@ -184,113 +183,103 @@ void signal_check_alarm(void)
     }
 }
 
+#define SIGNAL_TRAMPOLINE_VA 0x00f00000ULL
+
+static reg_t signal_trampoline(void)
+{
+    uaddr va = SIGNAL_TRAMPOLINE_VA;
+    uaddr pa;
+    if (get_mapping(current->mm->pdt, va, &pa)) return va;
+    pa = page_alloc();
+    map(current->mm->pdt, va, pa, PG_PRESENT | PG_WRITE | PG_USER);
+    arch_write_sigreturn((u8 *)va, current->linux_abi);
+    return va;
+}
+
 void signal_deliver(struct trap_frame *frame)
 {
     for (;;) {
         u32 pending;
         int sig;
-        u32 handler, restorer;
-        u32 *sp;
-        struct sig_context *ctx;
+        reg_t handler, restorer;
+        uaddr base;
+        struct trap_frame *saved;
+        u8 *info;
 
-        if (!(frame->cs & 3)) {
-            return;  /* only user-mode returns */
-        }
+        if (!(frame->cs & 3)) return;
         pending = current->pending_sig & ~current->blocked_sig;
         pending |= current->pending_sig & SIG_BIT(SIGKILL);
-        if (!pending) {
-            return;
-        }
-
-        for (sig = 1; sig < NSIG; sig++) {
-            if (pending & SIG_BIT(sig)) {
-                break;
-            }
-        }
-        if (sig >= NSIG) {
-            return;
-        }
+        if (!pending) return;
+        for (sig = 1; sig < NSIG; sig++)
+            if (pending & SIG_BIT(sig)) break;
+        if (sig >= NSIG) return;
         current->pending_sig &= ~SIG_BIT(sig);
-
         handler = current->sig_handler[sig];
         restorer = current->sig_restorer[sig];
-        if (sig == SIGKILL || sig == SIGSTOP) {
-            handler = (u32)SIG_DFL;
+        if (sig == SIGKILL || sig == SIGSTOP) handler = (uaddr)SIG_DFL;
+        if (handler == (uaddr)SIG_IGN) continue;
+        if (handler == (uaddr)SIG_DFL || handler == 0) {
+            if (default_ignored(sig)) continue;
+            terminate_current(sig);
         }
-        if (handler == (u32)SIG_IGN) {
-            continue;
-        }
-        if (handler == (u32)SIG_DFL || handler == 0 || restorer == 0) {
-            if (default_ignored(sig)) {
-                continue;
-            }
-            terminate_current(sig);  /* does not return */
-        }
+        if (!restorer) restorer = signal_trampoline();
+#ifdef DEBUG_E9
+        if (sig == SIGUSR1)
+            printk("deliver usr1 handler=%x restorer=%x oldpc=%x\n",
+                   handler, restorer, frame->eip);
+#endif
 
-        sp = (u32 *)frame->useresp;
-        sp -= sizeof(struct sig_context) / sizeof(u32);
-        ctx = (struct sig_context *)sp;
-        ctx->edi = frame->edi;
-        ctx->esi = frame->esi;
-        ctx->ebp = frame->ebp;
-        ctx->ebx = frame->ebx;
-        ctx->edx = frame->edx;
-        ctx->ecx = frame->ecx;
-        ctx->eax = frame->eax;
-        ctx->eip = frame->eip;
-        ctx->cs = frame->cs;
-        ctx->eflags = frame->eflags;
-        ctx->useresp = frame->useresp;
-        ctx->ss = frame->ss;
-        ctx->signum = (u32)sig;
-        ctx->old_mask = current->blocked_sig;
-
-        sp -= 2;
-        sp[0] = restorer;       /* return address used by the handler */
-        sp[1] = (u32)sig;       /* handler argument */
-
-        frame->useresp = (u32)sp;
+        base = (frame->useresp - 32 - sizeof(*frame) - 144) & ~(uaddr)15;
+        base = arch_signal_stack_adjust(base);
+        saved = (struct trap_frame *)(base + 16);
+        info = (u8 *)saved + sizeof(*saved);
+        memcpy((u8 *)saved, (const u8 *)frame, sizeof(*saved));
+        memset(info, 0, 128);
+        *(u32 *)info = sig;
+        *(u32 *)(info + 128) = current->blocked_sig;
+        *(uaddr *)(info + 136) = current->sig_frame;
+        current->sig_frame = (uaddr)saved;
+        frame->useresp = base;
+        frame->esp = base;
         frame->eip = handler;
+        arch_signal_arguments(frame, sig, (uaddr)info, (uaddr)saved, restorer);
         current->blocked_sig |= SIG_BIT(sig) | current->sig_mask[sig];
         current->blocked_sig &= ~SIG_BIT(SIGKILL);
         return;
     }
 }
 
-static int sigreturn_ctx(struct trap_frame *frame, struct sig_context *ctx)
+static int signal_restore(struct trap_frame *frame)
 {
-    if ((u32)ctx < 0x1000 || (u32)ctx + sizeof(*ctx) >= PAGE_OFFSET) {
+    struct trap_frame *saved = (struct trap_frame *)current->sig_frame;
+    uaddr base = ((uaddr)saved) - 16;
+    uaddr end = base + 16 + sizeof(*saved) + 144;
+    u32 old_mask;
+    int result;
+    if (base < 0x1000 || end < base || end > USER_ADDR_LIMIT)
         return -EFAULT;
+    old_mask = *(u32 *)((u8 *)saved + sizeof(*saved) + 128);
+    {
+        uaddr previous = *(uaddr *)((u8 *)saved + sizeof(*saved) + 136);
+        current->sig_frame = previous;
     }
-    current->blocked_sig = ctx->old_mask;
-    frame->edi = ctx->edi;
-    frame->esi = ctx->esi;
-    frame->ebp = ctx->ebp;
-    frame->ebx = ctx->ebx;
-    frame->edx = ctx->edx;
-    frame->ecx = ctx->ecx;
-    frame->eip = ctx->eip;
-    frame->cs = ctx->cs;
-    frame->eflags = ctx->eflags;
-    frame->useresp = ctx->useresp;
-    frame->ss = ctx->ss;
-    return (int)ctx->eax;
+#ifdef DEBUG_E9
+    printk("sigreturn base=%x saved=%x pc=%x sp=%x cs=%x\n",
+           base, saved, saved->eip, saved->useresp, saved->cs);
+#endif
+    result = (int)saved->eax;
+    memcpy((u8 *)frame, (const u8 *)saved, sizeof(*frame));
+    current->blocked_sig = old_mask;
+    return result;
 }
 
 int signal_sigreturn(struct trap_frame *frame)
 {
-    if (frame->useresp < 0x1000 || frame->useresp >= PAGE_OFFSET) {
-        return -EFAULT;
-    }
-    return sigreturn_ctx(frame,
-        (struct sig_context *)(frame->useresp + 4));
+    return signal_restore(frame);
 }
 
 int signal_sigreturn_linux(struct trap_frame *frame, int rt)
 {
-    if (frame->useresp < 0x1000 || frame->useresp >= PAGE_OFFSET) {
-        return -EFAULT;
-    }
-    return sigreturn_ctx(frame,
-        (struct sig_context *)(frame->useresp + (rt ? 4 : 0)));
+    (void)rt;
+    return signal_restore(frame);
 }

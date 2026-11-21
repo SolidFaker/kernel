@@ -213,12 +213,12 @@ typedef unsigned int fd_set;
 #define MAP_FAILED    ((void *)-1)
 
 struct mmap_args {
-    unsigned int addr;
-    unsigned int len;
-    unsigned int prot;
-    unsigned int flags;
+    __UINTPTR_TYPE__ addr;
+    __UINTPTR_TYPE__ len;
+    __UINTPTR_TYPE__ prot;
+    __UINTPTR_TYPE__ flags;
     int fd;
-    unsigned int offset;
+    __UINTPTR_TYPE__ offset;
 };
 
 struct winsize {
